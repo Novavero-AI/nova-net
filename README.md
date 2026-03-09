@@ -8,7 +8,7 @@
 [![Hackage](https://img.shields.io/hackage/v/nova-net.svg)](https://hackage.haskell.org/package/nova-net)
 ![Haskell](https://img.shields.io/badge/haskell-GHC%209.8-purple)
 ![C99](https://img.shields.io/badge/C99-hot%20path-orange)
-![License](https://img.shields.io/badge/license-MIT-blue)
+![License](https://img.shields.io/badge/license-BSD--3--Clause-blue)
 
 </p>
 </div>
@@ -85,5 +85,5 @@ cabal test && cabal build --ghc-options="-Werror"
 ---
 
 <p align="center">
-  <sub>MIT License · <a href="https://github.com/Novavero-AI">Novavero AI</a></sub>
+  <sub>BSD-3-Clause · <a href="https://github.com/Novavero-AI">Novavero AI</a></sub>
 </p>

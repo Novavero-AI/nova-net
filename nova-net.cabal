@@ -9,7 +9,7 @@ description:
   state machines, congestion control, replication) for
   correct-by-construction logic. Successor to gbnet-hs.
 
-license:            MIT
+license:            BSD-3-Clause
 license-file:       LICENSE
 author:             Devon Tomlin
 maintainer:         devon.tomlin@novavero.ai
