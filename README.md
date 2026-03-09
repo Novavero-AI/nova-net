@@ -17,9 +17,9 @@
 
 ## What is nova-net?
 
-A general-purpose reliable UDP networking library. C99 handles the hot path (serialization, send/recv, ack processing, crypto). Haskell handles the protocol logic (connection state machines, congestion control, replication). Successor to [gbnet-hs](https://hackage.haskell.org/package/gbnet-hs).
+A general-purpose reliable UDP networking library. C99 handles the hot path (serialization, send/recv, ack processing, crypto). Haskell handles the protocol logic (connection state machines, congestion control, replication).
 
-- **C99 hot path** — packet serialization, socket I/O, ACK bitfield processing, CRC32C, ChaCha20-Poly1305. No heap allocation. Sub-10ns targets.
+- **C99 hot path** — packet serialization, socket I/O, ACK bitfield processing, CRC32C, ChaCha20-Poly1305. No heap allocation on the hot path.
 - **Haskell protocol brain** — connection state machines, handshake orchestration, congestion control, replication. Pure, testable, correct-by-construction.
 - **Unsafe FFI boundary** — Haskell calls C with zero marshalling overhead. Just a function pointer jump.
 - **Any platform** — C99 core compiles everywhere. Link from Haskell, Swift, Kotlin, Python, Zig, anything.
@@ -48,18 +48,16 @@ A general-purpose reliable UDP networking library. C99 handles the hot path (ser
 
 ---
 
-## Heritage
-
-nova-net inherits the protocol design from [gbnet-hs](https://hackage.haskell.org/package/gbnet-hs), a production-tested Haskell networking library:
+## Features
 
 - 68-bit packet headers (4-bit type + 16-bit seq + 16-bit ack + 32-bit ack bitfield)
 - 5 delivery modes (Unreliable, UnreliableSequenced, ReliableUnordered, ReliableOrdered, ReliableSequenced)
 - Dual-layer congestion control (binary mode + TCP New Reno window)
 - ChaCha20-Poly1305 AEAD encryption with anti-replay
 - Jacobson/Karels RTT estimation with adaptive retransmit
+- Large message fragmentation and reassembly
+- Connection migration
 - Delta compression, interest filtering, priority accumulation, snapshot interpolation
-
-Same protocol. C muscles.
 
 ---
 

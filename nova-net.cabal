@@ -15,11 +15,12 @@ author:             Devon Tomlin
 maintainer:         devon.tomlin@novavero.ai
 homepage:           https://github.com/Novavero-AI/nova-net
 bug-reports:        https://github.com/Novavero-AI/nova-net/issues
-category:           Network
+category:           Network, Game
 stability:          experimental
 build-type:         Simple
 tested-with:        GHC == 9.8.4
 extra-doc-files:
+    README.md
     CHANGELOG.md
 
 library
