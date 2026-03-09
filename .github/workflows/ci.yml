@@ -92,7 +92,7 @@ jobs:
           restore-keys: cabal-${{ runner.os }}-v1-
 
       - name: Build
-        run: cabal build --ghc-options="-Werror"
+        run: cabal build --enable-tests --ghc-options="-Werror"
 
       - name: Test
-        run: cabal test --ghc-options="-Werror" --test-show-details=streaming
+        run: cabal test --enable-tests --ghc-options="-Werror" --test-show-details=streaming
