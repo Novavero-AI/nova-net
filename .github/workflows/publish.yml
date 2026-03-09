@@ -1,0 +1,40 @@
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to Hackage
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set version from tag
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          sed -i "s/^version:.*/version:            $TAG_VERSION/" nova-net.cabal
+          echo "Set version to $TAG_VERSION"
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.8.4'
+          cabal-version: '3.14'
+      - run: cabal sdist
+      - name: Upload to Hackage
+        run: |
+          SDIST=$(ls dist-newstyle/sdist/nova-net-*.tar.gz)
+          curl --fail --silent --show-error \
+            --header "Authorization: X-ApiKey ${HACKAGE_TOKEN}" \
+            --form "package=@${SDIST}" \
+            https://hackage.haskell.org/packages/
+        env:
+          HACKAGE_TOKEN: ${{ secrets.HACKAGE_TOKEN }}
