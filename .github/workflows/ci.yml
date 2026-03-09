@@ -11,6 +11,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# ---------------------------------------------------------------------------
+# Lint jobs (fast, Linux-only)
+# ---------------------------------------------------------------------------
+
 jobs:
   lint:
     name: HLint
@@ -37,75 +41,58 @@ jobs:
             test/**/*.hs
             bench/**/*.hs
 
-  build:
-    name: Build (${{ matrix.os }})
-    needs: [lint, format]
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: haskell-actions/setup@v2
-        with:
-          ghc-version: '9.8.4'
-          cabal-version: '3.14'
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cabal/store
-            dist-newstyle
-          key: ${{ runner.os }}-ghc-9.8.4-${{ hashFiles('nova-net.cabal') }}
-          restore-keys: ${{ runner.os }}-ghc-9.8.4-
-      - run: cabal build --only-dependencies
-      - run: cabal build
-
-  test:
-    name: Test
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: haskell-actions/setup@v2
-        with:
-          ghc-version: '9.8.4'
-          cabal-version: '3.14'
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cabal/store
-            dist-newstyle
-          key: ${{ runner.os }}-ghc-9.8.4-${{ hashFiles('nova-net.cabal') }}
-          restore-keys: ${{ runner.os }}-ghc-9.8.4-
-      - run: cabal test --enable-tests
-
-  warnings:
-    name: Warnings
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: haskell-actions/setup@v2
-        with:
-          ghc-version: '9.8.4'
-          cabal-version: '3.14'
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cabal/store
-            dist-newstyle
-          key: ${{ runner.os }}-ghc-9.8.4-${{ hashFiles('nova-net.cabal') }}
-          restore-keys: ${{ runner.os }}-ghc-9.8.4-
-      - run: cabal build --ghc-options="-Wall -Werror"
+  # ---------------------------------------------------------------------------
+  # Packaging check (Linux-only)
+  # ---------------------------------------------------------------------------
 
   cabal-check:
     name: Cabal Check
-    needs: [build]
+    needs: [lint, format]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: haskell-actions/setup@v2
         with:
-          ghc-version: '9.8.4'
-          cabal-version: '3.14'
+          ghc-version: '9.8'
+          cabal-version: 'latest'
       - run: cabal check
+
+  # ---------------------------------------------------------------------------
+  # Build (cross-platform matrix — C + Haskell)
+  # ---------------------------------------------------------------------------
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: [lint, format, cabal-check]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.8'
+          cabal-version: 'latest'
+
+      - name: Cache Cabal store
+        uses: actions/cache@v4
+        with:
+          path: ~/.cabal/store
+          key: cabal-${{ runner.os }}-v1-${{ hashFiles('nova-net.cabal') }}
+          restore-keys: cabal-${{ runner.os }}-v1-
+
+      - name: Build
+        run: cabal build --ghc-options="-Werror"
+
+      - name: Test
+        run: cabal test --ghc-options="-Werror" --test-show-details=streaming
