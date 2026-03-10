@@ -1,5 +1,6 @@
 module Main (main) where
 
+import Control.Monad (unless)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Word (Word8)
@@ -77,7 +78,7 @@ main = do
 
   TestState ran passed <- readIORef t
   putStrLn $ show passed ++ "/" ++ show ran ++ " tests passed"
-  if ran == passed then pure () else exitFailure
+  unless (ran == passed) exitFailure
 
 -- ---------------------------------------------------------------------------
 -- Types

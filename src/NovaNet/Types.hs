@@ -1,5 +1,3 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-
 -- |
 -- Module      : NovaNet.Types
 -- Description : Domain newtypes and core ADTs for type-safe networking
