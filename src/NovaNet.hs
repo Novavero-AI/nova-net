@@ -33,6 +33,7 @@ module NovaNet
     module NovaNet.Reliability,
     module NovaNet.Channel,
     module NovaNet.Congestion,
+    module NovaNet.Connection,
   )
 where
 
@@ -40,6 +41,7 @@ import NovaNet.Channel
 import NovaNet.Class
 import NovaNet.Config
 import NovaNet.Congestion
+import NovaNet.Connection
 import NovaNet.FFI.AckProcess
 import NovaNet.FFI.Bandwidth
 import NovaNet.FFI.Batch

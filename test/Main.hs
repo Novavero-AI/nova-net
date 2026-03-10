@@ -6,6 +6,7 @@ import Control.Monad (unless)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Int (Int64)
+import qualified Data.Map.Strict as Map
 import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Marshal.Array (pokeArray)
@@ -13,6 +14,7 @@ import Foreign.Ptr (plusPtr)
 import NovaNet.Channel
 import NovaNet.Config
 import NovaNet.Congestion
+import NovaNet.Connection
 import NovaNet.FFI.Bandwidth (bandwidthBps, bandwidthRecord, newBandwidthTracker)
 import NovaNet.FFI.CRC32C (crc32c)
 import NovaNet.FFI.Crypto (cryptoNonceSize, decrypt, encrypt)
@@ -93,6 +95,9 @@ main = do
 
   -- Congestion
   testCongestion t
+
+  -- Connection
+  testConnection t
 
   TestState ran passed <- readIORef t
   putStrLn $ show passed ++ "/" ++ show ran ++ " tests passed"
@@ -714,3 +719,136 @@ testCongestion t = do
   -- CWND: rate returns 0 (CWND uses pacing)
   rateCwnd <- congestionRate cwnd
   assertEqual t "cong_cwnd_rate_zero" 0.0 rateCwnd
+
+-- ---------------------------------------------------------------------------
+-- Connection tests
+-- ---------------------------------------------------------------------------
+
+testConnection :: T -> IO ()
+testConnection t = do
+  let now = MonoTime 1000000000
+      cid = case mkChannelId 0 of Just c -> c; Nothing -> error "impossible"
+
+  -- Construction
+  conn0 <- newConnection defaultNetworkConfig now
+  assertEqual t "conn_init_state" Disconnected (connectionState conn0)
+  assertEqual t "conn_init_chans" (ncMaxChannels defaultNetworkConfig) (channelCount conn0)
+  assert t "conn_init_not_connected" (not (isConnected conn0))
+
+  -- State: connect
+  case connect conn0 of
+    Left err -> assert t ("conn_connect: " ++ show err) False
+    Right conn1 -> do
+      assertEqual t "conn_connecting" Connecting (connectionState conn1)
+
+      -- Double connect fails
+      case connect conn1 of
+        Left ErrAlreadyConnected -> assert t "conn_double_connect" True
+        _ -> assert t "conn_double_connect" False
+
+      -- Mark connected
+      let conn2 = markConnected now conn1
+      assert t "conn_connected" (isConnected conn2)
+
+      -- Disconnect
+      let conn3 = disconnect ReasonRequested now conn2
+      assertEqual t "conn_disconnecting" Disconnecting (connectionState conn3)
+
+      -- Send when not connected
+      conn4 <- newConnection defaultNetworkConfig now
+      case sendMessage cid "test" now conn4 of
+        Left ErrNotConnected -> assert t "conn_send_not_connected" True
+        _ -> assert t "conn_send_not_connected" False
+
+      -- Send/receive roundtrip
+      case sendMessage cid "hello" now conn2 of
+        Left err -> assert t ("conn_send: " ++ show err) False
+        Right conn5 -> do
+          let conn6 = receiveIncomingPayload cid (SequenceNum 0) "world" now conn5
+              (msgs, conn7) = receiveMessages cid conn6
+          assertEqual t "conn_recv" 1 (length msgs)
+          assertEqual t "conn_recv_data" ["world"] msgs
+
+          -- drainSendQueue (updateTick ticks congestion + processes output)
+          tickResult <- updateTick (addNs now 100000000) conn7 -- 100ms tick
+          case tickResult of
+            Left err -> assert t ("conn_tick: " ++ show err) False
+            Right conn8 -> do
+              let (pkts, conn9) = drainSendQueue conn8
+              assert t "conn_drain_has_pkts" (not (null pkts))
+              let (pkts2, _) = drainSendQueue conn9
+              assertEqual t "conn_drain_empty" 0 (length pkts2)
+
+  -- resolveChannelAcks: pure tests
+  let ackMap0 = Map.fromList [(10, (cid, SequenceNum 100)), (9, (cid, SequenceNum 99))]
+
+  -- Direct ack
+  let (resolved1, map1) = resolveChannelAcks 10 0x00000000 ackMap0
+  assertEqual t "conn_resolve_direct" 1 (length resolved1)
+  assert t "conn_resolve_direct_deleted" (not (Map.member 10 map1))
+
+  -- Bitfield ack: bit 0 = seq 9
+  let (resolved2, map2) = resolveChannelAcks 10 0x00000001 ackMap0
+  assertEqual t "conn_resolve_bitfield" 2 (length resolved2)
+  assert t "conn_resolve_both_deleted" (Map.null map2)
+
+  -- Empty map
+  let (resolved3, _) = resolveChannelAcks 10 0xFFFFFFFF Map.empty
+  assertEqual t "conn_resolve_empty" 0 (length resolved3)
+
+  -- Untracked seq (unreliable)
+  let (resolved4, _) = resolveChannelAcks 99 0x00000000 ackMap0
+  assertEqual t "conn_resolve_untracked" 0 (length resolved4)
+
+  -- Wraparound: ack_seq=0, bit 0 = seq 65535
+  let ackMapWrap = Map.fromList [(65535, (cid, SequenceNum 50))]
+      (resolved5, mapWrap) = resolveChannelAcks 0 0x00000001 ackMapWrap
+  assertEqual t "conn_resolve_wrap" 1 (length resolved5)
+  assert t "conn_resolve_wrap_deleted" (Map.null mapWrap)
+
+  -- processIncomingHeader: basic ack processing
+  conn10 <- newConnection defaultNetworkConfig now
+  case connect conn10 of
+    Left _ -> assert t "conn_header_setup" False
+    Right conn11 -> do
+      let conn12 = markConnected now conn11
+      -- Send a message to populate sent buffer
+      case sendMessage cid "ackme" now conn12 of
+        Left err -> assert t ("conn_header_send: " ++ show err) False
+        Right conn13 -> do
+          -- Process channel output to assign packet seq
+          conn14 <- processChannelOutput now conn13
+          -- Now process an incoming header that ACKs seq 0
+          mConn15 <- processIncomingHeader 100 0 0x00000000 (MonoTime 2000000000) conn14
+          case mConn15 of
+            Nothing -> assert t "conn_header_not_dup" False
+            Just conn15 -> do
+              assert t "conn_header_processed" True
+              -- Duplicate rejected
+              mConn16 <- processIncomingHeader 100 0 0x00000000 (MonoTime 2000000000) conn15
+              case mConn16 of
+                Nothing -> assert t "conn_header_dup" True
+                Just _ -> assert t "conn_header_dup" False
+
+  -- updateTick: timeout
+  connTimeout <- newConnection defaultNetworkConfig {ncConnectionTimeoutMs = Milliseconds 100.0} now
+  case connect connTimeout of
+    Left _ -> assert t "conn_timeout_setup" False
+    Right ct1 -> do
+      let ct2 = markConnected now ct1
+      -- Tick far in the future
+      result <- updateTick (MonoTime 10000000000) ct2
+      case result of
+        Left ErrTimeout -> assert t "conn_tick_timeout" True
+        _ -> assert t "conn_tick_timeout" False
+
+  -- updateTick: no timeout when recent activity
+  connActive <- newConnection defaultNetworkConfig now
+  case connect connActive of
+    Left _ -> assert t "conn_active_setup" False
+    Right ca1 -> do
+      let ca2 = markConnected now ca1
+      result2 <- updateTick (addNs now 100000000) ca2 -- 100ms later
+      case result2 of
+        Right _ -> assert t "conn_tick_no_timeout" True
+        Left _ -> assert t "conn_tick_no_timeout" False

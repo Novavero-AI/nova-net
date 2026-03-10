@@ -30,6 +30,7 @@ module NovaNet.Channel
     -- * Queries
     channelIsReliable,
     channelSendQueueLen,
+    channelPriority,
 
     -- * Accessors
     chStatsSent,
@@ -45,7 +46,7 @@ import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
-import Data.Word (Word16, Word64)
+import Data.Word (Word16, Word64, Word8)
 import NovaNet.Config (ChannelConfig (..))
 import NovaNet.FFI.Seq (seqGt)
 import NovaNet.Types
@@ -145,6 +146,10 @@ channelIsReliable = isReliable . ccDeliveryMode . chConfig
 -- | Number of messages in the send buffer awaiting ACK.
 channelSendQueueLen :: Channel -> Int
 channelSendQueueLen = IM.size . chSendBuffer
+
+-- | Channel priority (from config).
+channelPriority :: Channel -> Word8
+channelPriority = ccPriority . chConfig
 
 -- ---------------------------------------------------------------------------
 -- Send
