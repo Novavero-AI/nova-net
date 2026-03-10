@@ -40,6 +40,10 @@ module NovaNet.Connection
     channelCount,
     connReliability,
 
+    -- * Fragment processing
+    processFragment,
+    allocateMessageId,
+
     -- * Reset
     resetTransportMetrics,
 
@@ -66,6 +70,7 @@ import NovaNet.Channel
 import NovaNet.Config
 import NovaNet.Congestion
 import NovaNet.FFI.Bandwidth (BandwidthTracker, bandwidthRecord, newBandwidthTracker)
+import NovaNet.Fragment (FragmentAssembler, assemblerUpdate, newFragmentAssembler, onFragmentReceived)
 import NovaNet.Reliability
 import NovaNet.Types
 
@@ -132,6 +137,10 @@ data Connection = Connection
     connDisconnectReason :: !(Maybe DisconnectReason),
     connDisconnectTime :: !(Maybe MonoTime),
     connDisconnectRetries :: !Int,
+    -- Fragment reassembly
+    connFragmentAssembler :: !FragmentAssembler,
+    -- Message ID for outgoing fragments
+    connNextMessageId :: !MessageId,
     -- Flags
     connPendingAck :: !Bool,
     connDataSentThisTick :: !Bool
@@ -156,6 +165,7 @@ newConnection cfg now = do
   bwDown <- newBandwidthTracker bandwidthWindowMs
   let channels = buildChannels cfg
       priority = buildPriority cfg channels
+      fragAsm = newFragmentAssembler (ncFragmentTimeoutMs cfg) (ncMaxReassemblyBufferSize cfg)
   pure
     Connection
       { connConfig = cfg,
@@ -174,6 +184,8 @@ newConnection cfg now = do
         connDisconnectReason = Nothing,
         connDisconnectTime = Nothing,
         connDisconnectRetries = 0,
+        connFragmentAssembler = fragAsm,
+        connNextMessageId = initialMessageId,
         connPendingAck = False,
         connDataSentThisTick = False
       }
@@ -479,8 +491,11 @@ updateConnected now conn = do
       -- Channel updates (ordered buffer flush, dedup cleanup)
       let chans = IM.map (channelUpdate now) (connChannels conn)
 
+      -- Fragment reassembly timeout cleanup
+      let fragAsm = assemblerUpdate now (connFragmentAssembler conn)
+
       -- Retransmissions
-      conn2 <- processRetransmissions now (conn {connChannels = chans})
+      conn2 <- processRetransmissions now (conn {connChannels = chans, connFragmentAssembler = fragAsm})
 
       -- Congestion-gated output
       conn3 <- processChannelOutput now conn2
@@ -612,3 +627,20 @@ resetTransportMetrics :: Connection -> IO Connection
 resetTransportMetrics conn = do
   rel <- resetMetrics (connReliability conn)
   pure conn {connReliability = rel}
+
+-- ---------------------------------------------------------------------------
+-- Fragment processing
+-- ---------------------------------------------------------------------------
+
+-- | Process an incoming fragment through the reassembly pipeline.
+-- Returns the completed reassembled message when all fragments arrive.
+processFragment :: ByteString -> MonoTime -> Connection -> (Maybe ByteString, Connection)
+processFragment payload now conn =
+  let (result, updated) = onFragmentReceived payload now (connFragmentAssembler conn)
+   in (result, conn {connFragmentAssembler = updated})
+
+-- | Allocate the next message ID for outgoing fragmented messages.
+allocateMessageId :: Connection -> (MessageId, Connection)
+allocateMessageId conn =
+  let mid = connNextMessageId conn
+   in (mid, conn {connNextMessageId = nextMessageId mid})

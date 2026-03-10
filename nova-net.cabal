@@ -46,6 +46,10 @@ library
     NovaNet.Channel
     NovaNet.Congestion
     NovaNet.Connection
+    NovaNet.Fragment
+    NovaNet.Mtu
+    NovaNet.Security
+    NovaNet.Stats
 
   c-sources:
     cbits/nn_packet.c
@@ -92,6 +96,7 @@ test-suite nova-net-test
     , nova-net
     , bytestring    >= 0.11 && < 0.13
     , containers    >= 0.6  && < 0.8
+    , network       >= 3.1  && < 3.3
     , QuickCheck    >= 2.14 && < 2.16
   default-language: Haskell2010
   ghc-options:      -Wall -Wcompat

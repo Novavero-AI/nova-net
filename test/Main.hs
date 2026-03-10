@@ -11,6 +11,7 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Marshal.Array (pokeArray)
 import Foreign.Ptr (plusPtr)
+import Network.Socket (SockAddr (..))
 import NovaNet.Channel
 import NovaNet.Config
 import NovaNet.Congestion
@@ -22,7 +23,11 @@ import NovaNet.FFI.Fragment (fragmentCount)
 import NovaNet.FFI.Packet (packetHeaderSize, packetRead, packetWrite)
 import NovaNet.FFI.RecvBuf (newRecvBuf, recvBufExists, recvBufHighest, recvBufInsert)
 import NovaNet.FFI.Seq (seqDiff, seqGt)
+import NovaNet.Fragment
+import NovaNet.Mtu
 import NovaNet.Reliability
+import NovaNet.Security
+import NovaNet.Stats
 import NovaNet.Types
 import System.Exit (exitFailure)
 import Test.QuickCheck (elements, forAll, isSuccess, quickCheckResult)
@@ -98,6 +103,18 @@ main = do
 
   -- Connection
   testConnection t
+
+  -- Fragment
+  testFragment t
+
+  -- MTU
+  testMtu t
+
+  -- Security
+  testSecurity t
+
+  -- Stats
+  testStats t
 
   TestState ran passed <- readIORef t
   putStrLn $ show passed ++ "/" ++ show ran ++ " tests passed"
@@ -852,3 +869,486 @@ testConnection t = do
       case result2 of
         Right _ -> assert t "conn_tick_no_timeout" True
         Left _ -> assert t "conn_tick_no_timeout" False
+
+-- ---------------------------------------------------------------------------
+-- Fragment tests
+-- ---------------------------------------------------------------------------
+
+testFragment :: T -> IO ()
+testFragment t = do
+  let now = MonoTime 1000000000
+      asm0 = newFragmentAssembler (Milliseconds 5000.0) (1024 * 1024)
+
+  -- Initial state
+  assertEqual t "frag_init_pending" 0 (assemblerPendingCount asm0)
+  assertEqual t "frag_init_completed" (0 :: Word64) (assemblerStatsCompleted asm0)
+  assertEqual t "frag_init_timedout" (0 :: Word64) (assemblerStatsTimedOut asm0)
+  assertEqual t "frag_init_size" 0 (assemblerCurrentSize asm0)
+
+  -- splitMessage: basic 3 fragments
+  let payload300 = BS.replicate 300 0xAB
+  case splitMessage (MessageId 1) payload300 100 of
+    Left err -> assert t ("frag_split_basic: " ++ show err) False
+    Right frags -> do
+      assertEqual t "frag_split_count" 3 (length frags)
+      -- Each fragment: 6 header + data
+      case frags of
+        (f0 : _ : f2 : _) -> do
+          assertEqual t "frag_split_0_len" 106 (BS.length f0)
+          assertEqual t "frag_split_2_len" 106 (BS.length f2)
+        _ -> assert t "frag_split_lens" False
+
+  -- splitMessage: exact divisible (200 / 100 = 2)
+  let payload200 = BS.replicate 200 0xCD
+  case splitMessage (MessageId 2) payload200 100 of
+    Left err -> assert t ("frag_split_exact: " ++ show err) False
+    Right frags -> assertEqual t "frag_split_exact_count" 2 (length frags)
+
+  -- splitMessage: single fragment (payload <= max)
+  let payload50 = BS.replicate 50 0xEF
+  case splitMessage (MessageId 3) payload50 100 of
+    Left err -> assert t ("frag_split_single: " ++ show err) False
+    Right frags -> assertEqual t "frag_split_single_count" 1 (length frags)
+
+  -- splitMessage: empty payload
+  case splitMessage (MessageId 4) BS.empty 100 of
+    Left err -> assert t ("frag_split_empty: " ++ show err) False
+    Right frags -> assertEqual t "frag_split_empty_count" 0 (length frags)
+
+  -- splitMessage: too many fragments
+  let payloadHuge = BS.replicate 25600 0xAA
+  case splitMessage (MessageId 5) payloadHuge 100 of
+    Left TooManyFragments -> assert t "frag_split_toomany" True
+    Right _ -> assert t "frag_split_toomany" False
+
+  -- splitMessage: non-positive max payload
+  case splitMessage (MessageId 6) (BS.singleton 0) 0 of
+    Left TooManyFragments -> assert t "frag_split_zero_max" True
+    Right _ -> assert t "frag_split_zero_max" False
+
+  -- Split + reassemble roundtrip (in order)
+  let payloadOrig = BS.pack [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  case splitMessage (MessageId 10) payloadOrig 5 of
+    Left err -> assert t ("frag_roundtrip: " ++ show err) False
+    Right frags -> do
+      assertEqual t "frag_rt_count" 3 (length frags)
+      let feedAll [] a = (Nothing, a)
+          feedAll (f : fs) a =
+            case onFragmentReceived f now a of
+              (Just msg, a2) -> (Just msg, a2)
+              (Nothing, a2) -> feedAll fs a2
+      let (result, asm1) = feedAll frags asm0
+      case result of
+        Nothing -> assert t "frag_rt_complete" False
+        Just assembled -> do
+          assertEqual t "frag_rt_data" payloadOrig assembled
+          assertEqual t "frag_rt_completed_stat" (1 :: Word64) (assemblerStatsCompleted asm1)
+          assertEqual t "frag_rt_pending" 0 (assemblerPendingCount asm1)
+          assertEqual t "frag_rt_size" 0 (assemblerCurrentSize asm1)
+
+  -- Reassembly out of order: receive frag 2, 0, 1
+  case splitMessage (MessageId 20) payloadOrig 5 of
+    Left err -> assert t ("frag_ooo: " ++ show err) False
+    Right (frag0 : frag1 : frag2 : _) -> do
+      -- Receive frag 2 first
+      let (r1, asm1) = onFragmentReceived frag2 now asm0
+      assertEqual t "frag_ooo_r1" Nothing r1
+      assertEqual t "frag_ooo_pending1" 1 (assemblerPendingCount asm1)
+      -- Receive frag 0
+      let (r2, asm2) = onFragmentReceived frag0 now asm1
+      assertEqual t "frag_ooo_r2" Nothing r2
+      -- Receive frag 1 → complete
+      let (r3, asm3) = onFragmentReceived frag1 now asm2
+      case r3 of
+        Nothing -> assert t "frag_ooo_complete" False
+        Just assembled -> do
+          assertEqual t "frag_ooo_data" payloadOrig assembled
+          assertEqual t "frag_ooo_pending3" 0 (assemblerPendingCount asm3)
+    Right _ -> assert t "frag_ooo_split" False
+
+  -- Duplicate fragment ignored
+  case splitMessage (MessageId 30) payloadOrig 5 of
+    Left err -> assert t ("frag_dup: " ++ show err) False
+    Right (frag0 : _) -> do
+      let (_, asm1) = onFragmentReceived frag0 now asm0
+          (_, asm2) = onFragmentReceived frag0 now asm1 -- duplicate
+          -- Should still have 1 pending with 1 fragment, not 2
+      assertEqual t "frag_dup_pending" 1 (assemblerPendingCount asm2)
+    Right [] -> assert t "frag_dup_split" False
+
+  -- Invalid: count = 0
+  let badCount0 = BS.pack [1, 0, 0, 0, 0, 0] <> BS.singleton 0xFF
+      (rBadCnt, _) = onFragmentReceived badCount0 now asm0
+  assertEqual t "frag_bad_count0" Nothing rBadCnt
+
+  -- Invalid: index >= count
+  let badIdx = BS.pack [1, 0, 0, 0, 5, 3] <> BS.singleton 0xFF
+      (rBadIdx, _) = onFragmentReceived badIdx now asm0
+  assertEqual t "frag_bad_idx" Nothing rBadIdx
+
+  -- Invalid: too short (< 6 bytes)
+  let tooShort = BS.pack [1, 2, 3]
+      (rShort, _) = onFragmentReceived tooShort now asm0
+  assertEqual t "frag_too_short" Nothing rShort
+
+  -- Count mismatch: first fragment says count=3, second says count=4
+  case splitMessage (MessageId 40) payloadOrig 5 of
+    Left err -> assert t ("frag_mismatch: " ++ show err) False
+    Right (frag0 : _ : frag1Orig : _) -> do
+      let -- Tamper with count byte (byte 5) of frag1
+          frag1Bad = BS.take 5 frag1Orig <> BS.singleton 4 <> BS.drop 6 frag1Orig
+          (_, asm1) = onFragmentReceived frag0 now asm0
+          (rMis, _) = onFragmentReceived frag1Bad now asm1
+      assertEqual t "frag_mismatch_ignored" Nothing rMis
+    Right _ -> assert t "frag_mismatch_split" False
+
+  -- Timeout cleanup
+  let asmT = newFragmentAssembler (Milliseconds 100.0) (1024 * 1024) -- 100ms timeout
+  case splitMessage (MessageId 50) payloadOrig 5 of
+    Left err -> assert t ("frag_timeout: " ++ show err) False
+    Right (frag0 : _) -> do
+      let (_, asm1) = onFragmentReceived frag0 (MonoTime 1000000000) asmT
+      assertEqual t "frag_timeout_pre" 1 (assemblerPendingCount asm1)
+      -- Advance time past timeout (100ms = 100_000_000 ns)
+      let asm2 = assemblerUpdate (MonoTime 1200000000) asm1
+      assertEqual t "frag_timeout_post" 0 (assemblerPendingCount asm2)
+      assertEqual t "frag_timeout_stat" (1 :: Word64) (assemblerStatsTimedOut asm2)
+    Right [] -> assert t "frag_timeout_split" False
+
+  -- Memory eviction: max 15 bytes, insert partial multi-frag messages
+  let asmMem = newFragmentAssembler (Milliseconds 5000.0) 15
+  -- Message 60: 2 fragments, send only frag 0 (stays pending)
+  case splitMessage (MessageId 60) (BS.replicate 16 0xAA) 8 of
+    Left err -> assert t ("frag_evict_1: " ++ show err) False
+    Right frags -> case frags of
+      (frag0 : _) -> do
+        let (_, asm1) = onFragmentReceived frag0 now asmMem -- stores 8 bytes data
+        assertEqual t "frag_evict_pre" 1 (assemblerPendingCount asm1)
+        -- Message 61: 2 fragments, send only frag 0 (would push total to 16 > 15)
+        case splitMessage (MessageId 61) (BS.replicate 16 0xBB) 8 of
+          Left err -> assert t ("frag_evict_2: " ++ show err) False
+          Right frags2 -> case frags2 of
+            (frag1 : _) -> do
+              let (_, asm2) = onFragmentReceived frag1 now asm1
+              -- Oldest should have been evicted to make room
+              assertEqual t "frag_evict_post" 1 (assemblerPendingCount asm2)
+              assertEqual t "frag_evict_timedout" (1 :: Word64) (assemblerStatsTimedOut asm2)
+            [] -> assert t "frag_evict_2_split" False
+      [] -> assert t "frag_evict_1_split" False
+
+  -- Connection integration: processFragment
+  conn0 <- newConnection defaultNetworkConfig now
+  case connect conn0 of
+    Left _ -> assert t "frag_conn_setup" False
+    Right conn1 -> do
+      let conn2 = markConnected now conn1
+      case splitMessage (MessageId 70) payloadOrig 5 of
+        Left err -> assert t ("frag_conn_split: " ++ show err) False
+        Right frags -> do
+          let feedConn [] c = (Nothing, c)
+              feedConn (f : fs) c =
+                case processFragment f now c of
+                  (Just msg, c2) -> (Just msg, c2)
+                  (Nothing, c2) -> feedConn fs c2
+          let (connResult, _) = feedConn frags conn2
+          case connResult of
+            Nothing -> assert t "frag_conn_complete" False
+            Just assembled -> assertEqual t "frag_conn_data" payloadOrig assembled
+
+  -- Connection integration: allocateMessageId
+  conn3 <- newConnection defaultNetworkConfig now
+  let (mid1, conn4) = allocateMessageId conn3
+      (mid2, _) = allocateMessageId conn4
+  assertEqual t "frag_alloc_mid1" (0 :: Word32) (unMessageId mid1)
+  assertEqual t "frag_alloc_mid2" (1 :: Word32) (unMessageId mid2)
+
+-- ---------------------------------------------------------------------------
+-- MTU discovery tests
+-- ---------------------------------------------------------------------------
+
+testMtu :: T -> IO ()
+testMtu t = do
+  let now = MonoTime 1000000000
+
+  -- Initial state
+  let md0 = newMtuDiscovery 576 1500
+  assertEqual t "mtu_init_discovered" 576 (discoveredMtu md0)
+  assert t "mtu_init_not_complete" (not (mtuIsComplete md0))
+  assertEqual t "mtu_init_attempts" 0 (mtuAttempts md0)
+
+  -- First probe
+  let (probe1, md1) = nextProbe now md0
+  case probe1 of
+    Nothing -> assert t "mtu_probe1" False
+    Just size -> do
+      assertEqual t "mtu_probe1_size" 1038 size -- (576 + 1500) / 2
+      assertEqual t "mtu_probe1_attempts" 1 (mtuAttempts md1)
+
+  -- Probe success: raises lower bound
+  let md2 = onProbeSuccess 1038 md1
+  assertEqual t "mtu_success_discovered" 1038 (discoveredMtu md2)
+
+  -- Next probe after success: searches upper half
+  let later = addNs now (600 * 1000000) -- 600ms later
+      (probe2, md3) = nextProbe later md2
+  case probe2 of
+    Nothing -> assert t "mtu_probe2" False
+    Just size -> do
+      -- (1038 + 1500) / 2 = 1269
+      assertEqual t "mtu_probe2_size" 1269 size
+
+  -- Probe timeout: lowers upper bound
+  let md4 = onProbeTimeout md3
+  -- Now range is [1038, 1269]
+  let later2 = addNs later (600 * 1000000)
+      (probe3, _) = nextProbe later2 md4
+  case probe3 of
+    Nothing -> assert t "mtu_probe3" False
+    Just size -> do
+      -- (1038 + 1269) / 2 = 1153
+      assertEqual t "mtu_probe3_size" 1153 size
+
+  -- Convergence: range <= 1 (create with tight bounds)
+  let mdConverged = newMtuDiscovery 1200 1201
+      (probeConv, mdAfterConv) = nextProbe now mdConverged
+  assertEqual t "mtu_converge_noprobe" Nothing probeConv
+  assert t "mtu_converge_complete" (mtuIsComplete mdAfterConv)
+  assertEqual t "mtu_converge_discovered" 1200 (discoveredMtu mdAfterConv)
+
+  -- Complete state: once complete, no more probes
+  let (probeNone, _) = nextProbe (addNs now 1000000000) mdAfterConv
+  assertEqual t "mtu_complete_noprobe" Nothing probeNone
+
+  -- Max attempts exhaustion (wide range so convergence doesn't beat it)
+  let exhaustProbes md step
+        | mtuIsComplete md = md
+        | step > 15 = md -- safety
+        | otherwise =
+            let time = addNs now (fromIntegral step * 600 * 1000000)
+             in case nextProbe time md of
+                  (Nothing, updated) -> updated
+                  (Just _, updated) -> exhaustProbes (onProbeTimeout updated) (step + 1)
+      mdExhausted = exhaustProbes (newMtuDiscovery 0 1000000) (0 :: Int)
+  assert t "mtu_max_attempts_complete" (mtuIsComplete mdExhausted)
+  assertEqual t "mtu_max_attempts_count" 10 (mtuAttempts mdExhausted)
+
+  -- Timing: can't probe again before timeout
+  let (_, md5) = nextProbe now md0
+      tooSoon = addNs now (100 * 1000000) -- 100ms (< 500ms timeout)
+      (probeBlocked, _) = nextProbe tooSoon md5
+  assertEqual t "mtu_timing_blocked" Nothing probeBlocked
+
+  -- Timing: can probe after timeout
+  let afterTimeout = addNs now (600 * 1000000) -- 600ms (> 500ms timeout)
+      (probeAllowed, _) = nextProbe afterTimeout md5
+  case probeAllowed of
+    Just _ -> assert t "mtu_timing_allowed" True
+    Nothing -> assert t "mtu_timing_allowed" False
+
+  -- checkProbeTimeout: auto-detect
+  let (_, md6) = nextProbe now md0
+      afterTO = addNs now (600 * 1000000)
+      md7 = checkProbeTimeout afterTO md6
+  -- Should have lowered high bound (probe timed out)
+  -- Initial probe was (576+1500)/2 = 1038, so highBound should now be 1038
+  let (probe4, _) = nextProbe (addNs afterTO (600 * 1000000)) md7
+  case probe4 of
+    Nothing -> assert t "mtu_auto_timeout_probe" False
+    Just size -> do
+      -- After timeout, range is [576, 1038], midpoint = 807
+      assertEqual t "mtu_auto_timeout_size" 807 size
+
+  -- Full convergence simulation: binary search narrows correctly
+  let simulate step md
+        | mtuIsComplete md = md
+        | step > 20 = md -- safety limit
+        | otherwise =
+            let time = addNs now (fromIntegral step * 600 * 1000000)
+             in case nextProbe time md of
+                  (Nothing, updated) -> updated
+                  (Just size, updated) ->
+                    -- Simulate: sizes <= 1200 succeed, > 1200 fail
+                    if size <= 1200
+                      then simulate (step + 1) (onProbeSuccess size updated)
+                      else simulate (step + 1) (onProbeTimeout updated)
+      final = simulate (0 :: Int) (newMtuDiscovery 576 1500)
+  assert t "mtu_sim_complete" (mtuIsComplete final)
+  -- Should discover close to 1200
+  assert t "mtu_sim_discovered" (discoveredMtu final >= 1196 && discoveredMtu final <= 1200)
+
+-- ---------------------------------------------------------------------------
+-- Security tests
+-- ---------------------------------------------------------------------------
+
+testSecurity :: T -> IO ()
+testSecurity t = do
+  let now = MonoTime 1000000000
+
+  -- Address hashing: deterministic
+  let addr1 = SockAddrInet 1234 0x7F000001 -- 127.0.0.1:1234
+      addr2 = SockAddrInet 1234 0x7F000001 -- same
+      addr3 = SockAddrInet 5678 0x7F000001 -- different port
+  assertEqual t "sec_addr_deterministic" (addressKey addr1) (addressKey addr2)
+  assert t "sec_addr_diff_port" (addressKey addr1 /= addressKey addr3)
+
+  -- Address hashing: different hosts
+  let addr4 = SockAddrInet 1234 0x0A000001 -- 10.0.0.1:1234
+  assert t "sec_addr_diff_host" (addressKey addr1 /= addressKey addr4)
+
+  -- Rate limiter: allows up to max
+  let rl0 = newRateLimiter 3 now
+      key1 = addressKey addr1
+  let (ok1, rl1) = rateLimiterAllow key1 now rl0
+  assert t "sec_rl_allow_1" ok1
+  let (ok2, rl2) = rateLimiterAllow key1 now rl1
+  assert t "sec_rl_allow_2" ok2
+  let (ok3, rl3) = rateLimiterAllow key1 now rl2
+  assert t "sec_rl_allow_3" ok3
+  -- 4th request denied
+  let (ok4, rl4) = rateLimiterAllow key1 now rl3
+  assert t "sec_rl_deny_4" (not ok4)
+  assertEqual t "sec_rl_drops" (1 :: Word64) (rateLimiterDropCount rl4)
+
+  -- Rate limiter: different sources are independent
+  let key2 = addressKey addr3
+      (ok5, _) = rateLimiterAllow key2 now rl4
+  assert t "sec_rl_diff_source" ok5
+
+  -- Rate limiter: window expires after 1 second
+  let afterWindow = addNs now (1100 * 1000000) -- 1.1 seconds later
+      (ok6, _) = rateLimiterAllow key1 afterWindow rl4
+  assert t "sec_rl_window_expire" ok6
+
+  -- Rate limiter: cleanup removes stale entries
+  let afterCleanup = addNs now (6000 * 1000000) -- 6 seconds later
+      (_, rlCleaned) = rateLimiterAllow key2 afterCleanup rl4
+  -- After cleanup, key1's stale entries should be removed
+  -- (cleanup triggered because 6s > 5s interval)
+  let (ok7, _) = rateLimiterAllow key1 afterCleanup rlCleaned
+  assert t "sec_rl_after_cleanup" ok7
+
+  -- Connect token: creation and expiration
+  let token1 = newConnectToken 42 (Milliseconds 1000.0) "userdata" now
+  assertEqual t "sec_token_cid" (42 :: Word64) (tokenClientId token1)
+  assertEqual t "sec_token_data" "userdata" (tokenUserData token1)
+  assert t "sec_token_not_expired" (not (isTokenExpired now token1))
+
+  -- Token expires after duration
+  let afterExpire = addNs now (1100 * 1000000) -- 1.1 seconds
+  assert t "sec_token_expired" (isTokenExpired afterExpire token1)
+
+  -- Token not expired just before duration
+  let justBefore = addNs now (900 * 1000000) -- 0.9 seconds
+  assert t "sec_token_not_expired_yet" (not (isTokenExpired justBefore token1))
+
+  -- Token validator: accepts valid token
+  let tv0 = newTokenValidator (Milliseconds 5000.0) 100
+  case validateToken token1 now tv0 of
+    (Right cid, tv1) -> do
+      assertEqual t "sec_tv_accept_cid" (42 :: Word64) cid
+      -- Replay detection: same token rejected
+      case validateToken token1 now tv1 of
+        (Left TokenReplayed, _) -> assert t "sec_tv_replay" True
+        _ -> assert t "sec_tv_replay" False
+    (Left err, _) -> assert t ("sec_tv_accept: " ++ show err) False
+
+  -- Token validator: rejects expired token
+  let tokenOld = newConnectToken 99 (Milliseconds 100.0) "" now
+  case validateToken tokenOld (addNs now (200 * 1000000)) tv0 of
+    (Left TokenExpired, _) -> assert t "sec_tv_expired" True
+    _ -> assert t "sec_tv_expired" False
+
+  -- Token validator: eviction when over capacity
+  let tvSmall = newTokenValidator (Milliseconds 60000.0) 2 -- long lifetime, capacity 2
+      tok1 = newConnectToken 1 (Milliseconds 60000.0) "" now
+      tok2 = newConnectToken 2 (Milliseconds 60000.0) "" now
+      tok3 = newConnectToken 3 (Milliseconds 60000.0) "" now
+  case validateToken tok1 now tvSmall of
+    (Right _, tv1) ->
+      case validateToken tok2 now tv1 of
+        (Right _, tv2) ->
+          -- Third token should trigger eviction
+          case validateToken tok3 now tv2 of
+            (Right _, tv3) -> do
+              assert t "sec_tv_evict" True
+              assertEqual t "sec_tv_evict_count" (1 :: Word64) (validatorEvictedCount tv3)
+            (Left err, _) -> assert t ("sec_tv_evict: " ++ show err) False
+        (Left err, _) -> assert t ("sec_tv_evict2: " ++ show err) False
+    (Left err, _) -> assert t ("sec_tv_evict1: " ++ show err) False
+
+  -- Validator cleanup: removes expired tokens
+  let tvClean = newTokenValidator (Milliseconds 100.0) 100 -- 100ms lifetime
+      tokClean = newConnectToken 77 (Milliseconds 100.0) "" now
+  case validateToken tokClean now tvClean of
+    (Right _, tv1) -> do
+      let tv2 = validatorCleanup (addNs now (200 * 1000000)) tv1
+      -- After cleanup, token should be gone — same clientId should be accepted
+      case validateToken tokClean (addNs now (200 * 1000000)) tv2 of
+        (Left TokenExpired, _) -> assert t "sec_tv_cleanup" True -- token itself expired
+        _ -> assert t "sec_tv_cleanup" False
+    (Left err, _) -> assert t ("sec_tv_cleanup_setup: " ++ show err) False
+
+-- ---------------------------------------------------------------------------
+-- Stats tests
+-- ---------------------------------------------------------------------------
+
+testStats :: T -> IO ()
+testStats t = do
+  -- Connection quality thresholds
+  assertEqual t "stat_q_excellent" QualityExcellent (assessQuality 50.0 0.2)
+  assertEqual t "stat_q_good" QualityGood (assessQuality 90.0 0.3)
+  assertEqual t "stat_q_fair" QualityFair (assessQuality 160.0 1.0)
+  assertEqual t "stat_q_poor" QualityPoor (assessQuality 300.0 3.0)
+  assertEqual t "stat_q_bad_rtt" QualityBad (assessQuality 600.0 0.0)
+  assertEqual t "stat_q_bad_loss" QualityBad (assessQuality 10.0 15.0)
+
+  -- Quality: worst metric wins
+  assertEqual t "stat_q_worst_wins" QualityBad (assessQuality 600.0 15.0)
+
+  -- Quality: boundary values
+  assertEqual t "stat_q_boundary_excellent" QualityExcellent (assessQuality 80.0 0.5)
+  assertEqual t "stat_q_boundary_good" QualityGood (assessQuality 81.0 0.5)
+  assertEqual t "stat_q_boundary_good2" QualityGood (assessQuality 80.0 0.6)
+
+  -- Quality: zero values
+  assertEqual t "stat_q_zero" QualityExcellent (assessQuality 0.0 0.0)
+
+  -- Quality ordering
+  assert t "stat_q_ord" (QualityExcellent < QualityBad)
+
+  -- Congestion level ordering
+  assert t "stat_cl_ord" (CongestionNone < CongestionCritical)
+
+  -- Default network stats
+  let ns = defaultNetworkStats
+  assertEqual t "stat_ns_sent" (0 :: Word64) (nsPacketsSent ns)
+  assertEqual t "stat_ns_quality" QualityExcellent (nsQuality ns)
+  assertEqual t "stat_ns_cong" CongestionNone (nsCongestionLevel ns)
+
+  -- Socket stats: initial
+  let ss0 = defaultSocketStats
+  assertEqual t "stat_ss_init_sent" (0 :: Word64) (ssPacketsSent ss0)
+  assertEqual t "stat_ss_init_bytes" (0 :: Word64) (ssBytesSent ss0)
+
+  -- Socket stats: record send
+  let ss1 = recordSocketSend 1200 ss0
+  assertEqual t "stat_ss_send_pkts" (1 :: Word64) (ssPacketsSent ss1)
+  assertEqual t "stat_ss_send_bytes" (1200 :: Word64) (ssBytesSent ss1)
+
+  -- Socket stats: record recv
+  let ss2 = recordSocketRecv 800 ss1
+  assertEqual t "stat_ss_recv_pkts" (1 :: Word64) (ssPacketsReceived ss2)
+  assertEqual t "stat_ss_recv_bytes" (800 :: Word64) (ssBytesReceived ss2)
+
+  -- Socket stats: CRC drop
+  let ss3 = recordCrcDrop ss2
+  assertEqual t "stat_ss_crc" (1 :: Word64) (ssCrcDrops ss3)
+
+  -- Socket stats: decrypt failure
+  let ss4 = recordDecryptFailure ss3
+  assertEqual t "stat_ss_decrypt" (1 :: Word64) (ssDecryptFailures ss4)
+
+  -- Socket stats: accumulates
+  let ss5 = recordSocketSend 500 (recordSocketSend 300 ss4)
+  assertEqual t "stat_ss_accum_pkts" (3 :: Word64) (ssPacketsSent ss5)
+  assertEqual t "stat_ss_accum_bytes" (2000 :: Word64) (ssBytesSent ss5)

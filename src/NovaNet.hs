@@ -34,6 +34,12 @@ module NovaNet
     module NovaNet.Channel,
     module NovaNet.Congestion,
     module NovaNet.Connection,
+
+    -- * Subsystems
+    module NovaNet.Fragment,
+    module NovaNet.Mtu,
+    module NovaNet.Security,
+    module NovaNet.Stats,
   )
 where
 
@@ -55,5 +61,9 @@ import NovaNet.FFI.RecvBuf
 import NovaNet.FFI.Rtt
 import NovaNet.FFI.SentBuf
 import NovaNet.FFI.Seq
+import NovaNet.Fragment
+import NovaNet.Mtu
 import NovaNet.Reliability
+import NovaNet.Security
+import NovaNet.Stats
 import NovaNet.Types
