@@ -27,6 +27,10 @@ module NovaNet
     module NovaNet.FFI.LossWindow,
     module NovaNet.FFI.AckProcess,
     module NovaNet.FFI.Congestion,
+    module NovaNet.FFI.RecvBuf,
+
+    -- * Protocol modules
+    module NovaNet.Reliability,
   )
 where
 
@@ -41,7 +45,9 @@ import NovaNet.FFI.Crypto
 import NovaNet.FFI.Fragment
 import NovaNet.FFI.LossWindow
 import NovaNet.FFI.Packet
+import NovaNet.FFI.RecvBuf
 import NovaNet.FFI.Rtt
 import NovaNet.FFI.SentBuf
 import NovaNet.FFI.Seq
+import NovaNet.Reliability
 import NovaNet.Types

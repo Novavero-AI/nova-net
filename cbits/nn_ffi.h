@@ -105,6 +105,25 @@ void nn_ffi_bandwidth_record(void *bw, uint32_t size, uint64_t now_ns);
 double nn_ffi_bandwidth_bps(const void *bw, uint64_t now_ns);
 
 /* ---------------------------------------------------------------------------
+ * Recv buffer
+ * ------------------------------------------------------------------------- */
+
+/** Size of nn_recv_buf struct. */
+size_t nn_ffi_recv_buf_size(void);
+
+/** Init recv buffer. */
+void nn_ffi_recv_buf_init(void *buf);
+
+/** Return 1 if sequence was previously received. */
+int nn_ffi_recv_buf_exists(const void *buf, uint16_t seq);
+
+/** Record a received sequence number. */
+void nn_ffi_recv_buf_insert(void *buf, uint16_t seq);
+
+/** Highest received sequence number. */
+uint16_t nn_ffi_recv_buf_highest(const void *buf);
+
+/* ---------------------------------------------------------------------------
  * RTT estimation
  * ------------------------------------------------------------------------- */
 

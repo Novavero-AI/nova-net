@@ -3,7 +3,7 @@ module Main (main) where
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
 import Data.IORef
-import Data.Word (Word8)
+import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Marshal.Array (pokeArray)
 import Foreign.Ptr (plusPtr)
@@ -13,7 +13,9 @@ import NovaNet.FFI.CRC32C (crc32c)
 import NovaNet.FFI.Crypto (cryptoNonceSize, decrypt, encrypt)
 import NovaNet.FFI.Fragment (fragmentCount)
 import NovaNet.FFI.Packet (packetHeaderSize, packetRead, packetWrite)
+import NovaNet.FFI.RecvBuf (newRecvBuf, recvBufExists, recvBufHighest, recvBufInsert)
 import NovaNet.FFI.Seq (seqDiff, seqGt)
+import NovaNet.Reliability
 import NovaNet.Types
 import System.Exit (exitFailure)
 import Test.QuickCheck (elements, forAll, isSuccess, quickCheckResult)
@@ -75,6 +77,11 @@ main = do
 
   -- FFI
   testFFI t
+
+  -- Reliability
+  testRecvBuf t
+  testAckUpdate t
+  testReliability t
 
   TestState ran passed <- readIORef t
   putStrLn $ show passed ++ "/" ++ show ran ++ " tests passed"
@@ -332,3 +339,158 @@ testFFI t = do
   assertEqual t "fragmentCount 0/100" (Just 0) r2
   r3 <- fragmentCount 100 0
   assertEqual t "fragmentCount 100/0" Nothing r3
+
+-- ---------------------------------------------------------------------------
+-- RecvBuf FFI tests
+-- ---------------------------------------------------------------------------
+
+testRecvBuf :: T -> IO ()
+testRecvBuf t = do
+  rb <- newRecvBuf
+
+  -- Empty buffer
+  exists0 <- recvBufExists rb 42
+  assert t "recv_empty" (not exists0)
+
+  -- Insert and check
+  recvBufInsert rb 42
+  exists1 <- recvBufExists rb 42
+  assert t "recv_exists" exists1
+
+  -- Different seq
+  exists2 <- recvBufExists rb 43
+  assert t "recv_not_43" (not exists2)
+
+  -- Highest tracking
+  h1 <- recvBufHighest rb
+  assertEqual t "recv_highest" (42 :: Word16) h1
+
+  -- Collision: seq 0 and seq 256 map to same slot
+  rb2 <- newRecvBuf
+  recvBufInsert rb2 0
+  recvBufInsert rb2 256
+  gone <- recvBufExists rb2 0
+  assert t "recv_collision_evict" (not gone)
+  here <- recvBufExists rb2 256
+  assert t "recv_collision_new" here
+
+-- ---------------------------------------------------------------------------
+-- Pure ackUpdate tests
+-- ---------------------------------------------------------------------------
+
+testAckUpdate :: T -> IO ()
+testAckUpdate t = do
+  -- First packet
+  let (rs1, _) = ackUpdate 0 0 0
+  assertEqual t "ack_first_rs" (0 :: Word16) rs1
+
+  -- Second packet advances
+  let (rs2, ab2) = ackUpdate 0 0 1
+  assertEqual t "ack_advance_rs" (1 :: Word16) rs2
+  assert t "ack_advance_bit0" (ab2 `mod` 2 == 1) -- bit 0 set
+
+  -- Out-of-order: receive seq 2 then seq 1
+  let (rs3, ab3) = ackUpdate 0 0 2
+      (rs4, ab4) = ackUpdate rs3 ab3 1
+  assertEqual t "ack_ooo_rs" (2 :: Word16) rs4
+  assert t "ack_ooo_bit0" (ab4 `mod` 2 == 1) -- bit 0 = seq 1
+
+  -- Large gap clears bits
+  let (rs5, ab5) = ackUpdate 0 0xFFFFFFFF 100
+  assertEqual t "ack_gap_rs" (100 :: Word16) rs5
+  assertEqual t "ack_gap_bits" (0 :: Word64) ab5
+
+  -- Wraparound: seq 0 after 65535
+  let (rs6, ab6) = ackUpdate 65535 0 0
+  assertEqual t "ack_wrap_rs" (0 :: Word16) rs6
+  assert t "ack_wrap_bit0" (ab6 `mod` 2 == 1)
+
+  -- Duplicate: same as remote_seq
+  let (rs7, ab7) = ackUpdate 5 0 5
+  assertEqual t "ack_dup_rs" (5 :: Word16) rs7
+  assertEqual t "ack_dup_bits" (0 :: Word64) ab7
+
+  -- Bit position: seq at remote-1 sets bit 0
+  let (_, ab8) = ackUpdate 10 0 10
+      (rs9, ab9) = ackUpdate 10 ab8 9
+  assertEqual t "ack_pos_rs" (10 :: Word16) rs9
+  assert t "ack_pos_bit0" (ab9 `mod` 2 == 1)
+
+  -- getAckInfo truncates to 32 bits
+  let ep0rs = 42 :: Word16
+      ep0ab = 0xFFFFFFFF12345678 :: Word64
+      (ackSeq, ackBf) = (ep0rs, fromIntegral (ep0ab `mod` 0x100000000))
+  assertEqual t "ack_trunc_seq" (42 :: Word16) ackSeq
+  assertEqual t "ack_trunc_bf" (0x12345678 :: Word32) ackBf
+
+-- ---------------------------------------------------------------------------
+-- ReliableEndpoint integration tests
+-- ---------------------------------------------------------------------------
+
+testReliability :: T -> IO ()
+testReliability t = do
+  ep0 <- newReliableEndpoint 32768
+
+  -- Initial state
+  assertEqual t "rel_init_sent" (0 :: Word64) (reTotalSent ep0)
+  assertEqual t "rel_init_acked" (0 :: Word64) (reTotalAcked ep0)
+  flight0 <- packetsInFlight ep0
+  assertEqual t "rel_init_flight" 0 flight0
+
+  -- allocateSeq
+  let (seq1, ep1) = allocateSeq ep0
+  assertEqual t "rel_alloc_0" (0 :: Word16) (unSequenceNum seq1)
+  let (seq2, ep2) = allocateSeq ep1
+  assertEqual t "rel_alloc_1" (1 :: Word16) (unSequenceNum seq2)
+
+  -- allocateSeq wraps (allocate 65536 times to reach wrap)
+  let allocN n ep = if n <= (0 :: Int) then ep else let (_, next) = allocateSeq ep in allocN (n - 1) next
+      epAtMax = allocN 65535 ep0
+      (seqMax, epPostWrap) = allocateSeq epAtMax
+  assertEqual t "rel_alloc_wrap" (65535 :: Word16) (unSequenceNum seqMax)
+  let (seqWrapped, _) = allocateSeq epPostWrap
+  assertEqual t "rel_alloc_wrap_next" (0 :: Word16) (unSequenceNum seqWrapped)
+
+  -- onPacketSent
+  let cid = case mkChannelId 0 of Just c -> c; Nothing -> error "impossible"
+  ep3 <- onPacketSent ep2 seq1 cid (SequenceNum 0) (MonoTime 1000000) 64
+  assertEqual t "rel_sent_count" (1 :: Word64) (reTotalSent ep3)
+  assertEqual t "rel_sent_bytes" (64 :: Word64) (reBytesSent ep3)
+  flight1 <- packetsInFlight ep3
+  assertEqual t "rel_sent_flight" 1 flight1
+
+  -- onPacketReceived: new packet
+  mEp4 <- onPacketReceived ep3 10
+  case mEp4 of
+    Nothing -> assert t "rel_recv_new" False
+    Just ep4 -> do
+      assertEqual t "rel_recv_rs" (10 :: Word16) (reRemoteSeq ep4)
+      -- duplicate rejected
+      mEp5 <- onPacketReceived ep4 10
+      case mEp5 of
+        Nothing -> assert t "rel_recv_dup" True
+        Just _ -> assert t "rel_recv_dup" False
+
+  -- getAckInfo
+  let (ackS0, ackB0) = getAckInfo ep3
+  assertEqual t "rel_ackinfo_init_s" (0 :: Word16) ackS0
+  assertEqual t "rel_ackinfo_init_b" (0 :: Word32) ackB0
+
+  -- processIncomingAck with matching sent packet (fresh endpoint)
+  epAck <- newReliableEndpoint 32768
+  epAck2 <- onPacketSent epAck (SequenceNum 50) cid (SequenceNum 0) (MonoTime 1000000) 100
+  flightPre <- packetsInFlight epAck2
+  assertEqual t "rel_flight_pre_ack" 1 flightPre
+
+  (outcome, epAck3) <- processIncomingAck epAck2 50 0x00000000 (MonoTime 5000000)
+  assertEqual t "rel_ack_count" 1 (aoAckedCount outcome)
+  assertEqual t "rel_ack_bytes" 100 (aoAckedBytes outcome)
+  assertEqual t "rel_ack_total" (1 :: Word64) (reTotalAcked epAck3)
+
+  -- RTT fed after ack
+  srtt <- getSrttNs epAck3
+  assert t "rel_srtt_fed" (srtt > 0)
+
+  -- packetsInFlight decreases after ack
+  flightPost <- packetsInFlight epAck3
+  assertEqual t "rel_flight_after_ack" 0 flightPost

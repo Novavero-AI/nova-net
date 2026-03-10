@@ -148,6 +148,25 @@ double nn_ffi_bandwidth_bps(const void *bw, uint64_t now_ns)
 { return nn_bandwidth_bps((const nn_bandwidth *)bw, now_ns); }
 
 /* ---------------------------------------------------------------------------
+ * Recv buffer
+ * ------------------------------------------------------------------------- */
+
+size_t nn_ffi_recv_buf_size(void)
+{ return sizeof(nn_recv_buf); }
+
+void nn_ffi_recv_buf_init(void *buf)
+{ nn_recv_buf_init((nn_recv_buf *)buf); }
+
+int nn_ffi_recv_buf_exists(const void *buf, uint16_t seq)
+{ return nn_recv_buf_exists((const nn_recv_buf *)buf, seq); }
+
+void nn_ffi_recv_buf_insert(void *buf, uint16_t seq)
+{ nn_recv_buf_insert((nn_recv_buf *)buf, seq); }
+
+uint16_t nn_ffi_recv_buf_highest(const void *buf)
+{ return ((const nn_recv_buf *)buf)->highest; }
+
+/* ---------------------------------------------------------------------------
  * RTT estimation
  * ------------------------------------------------------------------------- */
 
