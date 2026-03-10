@@ -26,11 +26,27 @@ extra-doc-files:
 library
   exposed-modules:
     NovaNet
+    NovaNet.FFI.Packet
+    NovaNet.FFI.CRC32C
+    NovaNet.FFI.Seq
+    NovaNet.FFI.Fragment
+    NovaNet.FFI.Batch
+    NovaNet.FFI.Crypto
+    NovaNet.FFI.Bandwidth
+    NovaNet.Types
 
-  -- c-sources:
-  --   cbits/nn_packet.c
+  c-sources:
+    cbits/nn_packet.c
+    cbits/nn_crc32c.c
+    cbits/nn_seq.c
+    cbits/nn_fragment.c
+    cbits/nn_batch.c
+    cbits/nn_crypto.c
+    cbits/nn_bandwidth.c
+    cbits/nn_ffi.c
 
-  -- include-dirs:     cbits
+  include-dirs:     cbits
+  cc-options:       -std=c99 -Wall -Wextra -Wpedantic -Werror
 
   build-depends:
       base          >= 4.19 && < 5
