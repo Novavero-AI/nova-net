@@ -31,7 +31,7 @@
 typedef struct {
     uint64_t timestamps[NN_BANDWIDTH_MAX_SAMPLES]; /* nanoseconds */
     uint32_t sizes[NN_BANDWIDTH_MAX_SAMPLES];
-    int      head;       /* next write index */
+    uint32_t head;       /* next write index */
     int      count;      /* current sample count */
     double   window_ms;  /* measurement window */
 } nn_bandwidth;

@@ -257,22 +257,34 @@ poly1305_finish(poly1305_state *st, const uint8_t *data, size_t remaining,
     st->h[3] = (st->h[3] & mask) | g3;
     st->h[4] = (st->h[4] & mask) | g4;
 
+    /* Convert h from 5 x 26-bit limbs to 4 x 32-bit words.
+     * h = h0 + h1*2^26 + h2*2^52 + h3*2^78 + h4*2^104 */
+    uint64_t acc;
+    acc  = (uint64_t)st->h[0];
+    acc |= (uint64_t)st->h[1] << 26;
+    uint32_t w0 = (uint32_t)acc; acc >>= 32;
+
+    acc |= (uint64_t)st->h[2] << 20;   /* bit 52 → word1 bit 20 */
+    uint32_t w1 = (uint32_t)acc; acc >>= 32;
+
+    acc |= (uint64_t)st->h[3] << 14;   /* bit 78 → word2 bit 14 */
+    uint32_t w2 = (uint32_t)acc; acc >>= 32;
+
+    acc |= (uint64_t)st->h[4] << 8;    /* bit 104 → word3 bit 8 */
+    uint32_t w3 = (uint32_t)acc;
+
     /* h = h + pad (mod 2^128) */
     uint64_t f;
-    f  = (uint64_t)st->h[0] | ((uint64_t)st->h[1] << 26);
-    f += st->pad[0];
+    f = (uint64_t)w0 + st->pad[0];
     nn_write_u32le(tag + 0, (uint32_t)f); f >>= 32;
 
-    f += (uint64_t)st->h[1] >> 6 | ((uint64_t)st->h[2] << 20);
-    f += st->pad[1];
+    f += (uint64_t)w1 + st->pad[1];
     nn_write_u32le(tag + 4, (uint32_t)f); f >>= 32;
 
-    f += (uint64_t)st->h[2] >> 12 | ((uint64_t)st->h[3] << 14);
-    f += st->pad[2];
+    f += (uint64_t)w2 + st->pad[2];
     nn_write_u32le(tag + 8, (uint32_t)f); f >>= 32;
 
-    f += (uint64_t)st->h[3] >> 18 | ((uint64_t)st->h[4] << 8);
-    f += st->pad[3];
+    f += (uint64_t)w3 + st->pad[3];
     nn_write_u32le(tag + 12, (uint32_t)f);
 
     /* Wipe state */

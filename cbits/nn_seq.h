@@ -31,9 +31,6 @@
 /** NACKs needed for fast retransmit. */
 #define NN_FAST_RETRANSMIT_THRESHOLD 3
 
-/** Sentinel value for empty received buffer slots. */
-#define NN_SEQ_EMPTY 0xFFFF
-
 /* ---------------------------------------------------------------------------
  * Sequence number comparison (wraparound-safe)
  * ------------------------------------------------------------------------- */
@@ -61,20 +58,24 @@ static inline int32_t nn_seq_diff(uint16_t s1, uint16_t s2) {
 
 typedef struct {
     uint16_t seqs[NN_SEQ_RING_SIZE];
+    uint8_t  occupied[NN_SEQ_RING_SIZE];
     uint16_t highest;
 } nn_recv_buf;
 
-/** Initialize all slots to NN_SEQ_EMPTY. */
+/** Initialize all slots to empty. */
 void nn_recv_buf_init(nn_recv_buf *buf);
 
 /** Return 1 if sequence was previously received. */
 static inline int nn_recv_buf_exists(const nn_recv_buf *buf, uint16_t seq) {
-    return buf->seqs[seq & NN_SEQ_RING_MASK] == seq;
+    int idx = seq & NN_SEQ_RING_MASK;
+    return buf->occupied[idx] && buf->seqs[idx] == seq;
 }
 
 /** Record a received sequence number. */
 static inline void nn_recv_buf_insert(nn_recv_buf *buf, uint16_t seq) {
-    buf->seqs[seq & NN_SEQ_RING_MASK] = seq;
+    int idx = seq & NN_SEQ_RING_MASK;
+    buf->seqs[idx] = seq;
+    buf->occupied[idx] = 1;
     if (nn_seq_gt(seq, buf->highest))
         buf->highest = seq;
 }
@@ -181,7 +182,7 @@ void nn_ack_update(uint16_t *remote_seq, uint64_t *ack_bits, uint16_t seq);
 
 typedef struct {
     uint64_t bits[4]; /* bits[0]=0-63, bits[1]=64-127, bits[2]=128-191, bits[3]=192-255 */
-    int      index;   /* next write position (mod 256) */
+    uint32_t index;   /* next write position (mod 256) */
     int      count;   /* number of samples recorded (max 256) */
 } nn_loss_window;
 
@@ -195,14 +196,16 @@ void nn_loss_window_record(nn_loss_window *lw, int lost);
 double nn_loss_window_percent(const nn_loss_window *lw);
 
 /* ---------------------------------------------------------------------------
- * SplitMix RNG — deterministic, pure, no global state
+ * LCG + SplitMix output mixing — deterministic, pure, no global state
+ *
+ * State transition: Knuth MMIX LCG (full 2^64 period).
+ * Output function: SplitMix64 bijective mixing for high-quality output.
  * ------------------------------------------------------------------------- */
 
-/** Return (output, next_state). */
+/** Advance state and return mixed output. */
 static inline uint64_t nn_rng_next(uint64_t *state) {
     uint64_t s = *state * 6364136223846793005ull + 1442695040888963407ull;
     *state = s;
-    /* SplitMix output mixing */
     uint64_t z = s ^ (s >> 30);
     z *= 0xBF58476D1CE4E5B9ull;
     z ^= (z >> 27);
@@ -211,9 +214,9 @@ static inline uint64_t nn_rng_next(uint64_t *state) {
     return z;
 }
 
-/** Convert random uint64 to double in [0, 1). */
+/** Convert random uint64 to double in [0, 1) using 53 mantissa bits. */
 static inline double nn_rng_double(uint64_t val) {
-    return (double)(val & 0xFFFFFFFFu) / 4294967296.0;
+    return (double)(val >> 11) * (1.0 / 9007199254740992.0); /* 1 / 2^53 */
 }
 
 #endif /* NN_SEQ_H */

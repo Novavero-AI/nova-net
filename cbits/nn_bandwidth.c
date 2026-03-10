@@ -18,7 +18,7 @@ nn_bandwidth_init(nn_bandwidth *bw, double window_ms)
 void
 nn_bandwidth_record(nn_bandwidth *bw, uint32_t size, uint64_t now_ns)
 {
-    int idx = bw->head & NN_BANDWIDTH_MASK;
+    uint32_t idx = bw->head & NN_BANDWIDTH_MASK;
     bw->timestamps[idx] = now_ns;
     bw->sizes[idx]      = size;
     bw->head++;
@@ -37,9 +37,9 @@ nn_bandwidth_bps(const nn_bandwidth *bw, uint64_t now_ns)
     uint64_t total_bytes = 0;
     uint64_t oldest = now_ns;
 
-    int start = bw->head - bw->count;
+    uint32_t start = bw->head - (uint32_t)bw->count;
     for (int i = 0; i < bw->count; i++) {
-        int idx = (start + i) & NN_BANDWIDTH_MASK;
+        uint32_t idx = (start + (uint32_t)i) & NN_BANDWIDTH_MASK;
         if (bw->timestamps[idx] >= cutoff) {
             total_bytes += bw->sizes[idx];
             if (bw->timestamps[idx] < oldest)

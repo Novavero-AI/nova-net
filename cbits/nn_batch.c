@@ -26,11 +26,11 @@ nn_batch_writer_add(nn_batch_writer *w,
     if (w->count >= NN_BATCH_MAX_MESSAGES)
         return -1;
 
-    size_t needed = NN_BATCH_LENGTH_SIZE + msg_len;
-    if (w->offset + needed > w->capacity)
+    if (msg_len > UINT16_MAX)
         return -1;
 
-    if (msg_len > UINT16_MAX)
+    size_t needed = NN_BATCH_LENGTH_SIZE + msg_len;
+    if (w->offset + needed > w->capacity)
         return -1;
 
     nn_write_u16le(w->buf + w->offset, (uint16_t)msg_len);

@@ -178,6 +178,61 @@ static void test_truncated(void)
     }
 }
 
+static void test_padding_resilience(void)
+{
+    /* Write a known header, then set garbage in byte 8's low nibble.
+     * The read should ignore padding bits and produce identical output. */
+    nn_packet_header hdr = {
+        .packet_type = NN_PKT_PAYLOAD, .sequence_num = 42,
+        .ack = 40, .ack_bitfield = 0xDEADBEEF
+    };
+    uint8_t buf[NN_PACKET_HEADER_SIZE];
+    nn_packet_write(&hdr, buf);
+
+    /* Inject garbage into padding nibble */
+    buf[8] |= 0x0F;
+
+    nn_packet_header out;
+    int rc = nn_packet_read(buf, NN_PACKET_HEADER_SIZE, &out);
+    ASSERT_EQ("pad_rc", 0, rc);
+    ASSERT_EQ("pad_type", hdr.packet_type, out.packet_type);
+    ASSERT_EQ("pad_seq", hdr.sequence_num, out.sequence_num);
+    ASSERT_EQ("pad_ack", hdr.ack, out.ack);
+    ASSERT_EQ("pad_abf", hdr.ack_bitfield, out.ack_bitfield);
+}
+
+static void test_invalid_type_write(void)
+{
+    uint8_t buf[NN_PACKET_HEADER_SIZE];
+
+    /* Type 8 (just above max) should fail */
+    nn_packet_header hdr8 = {
+        .packet_type = 8, .sequence_num = 0, .ack = 0, .ack_bitfield = 0
+    };
+    int rc8 = nn_packet_write(&hdr8, buf);
+    tests_run++;
+    if (rc8 == -1) { tests_passed++; }
+    else { printf("FAIL write_type_8: expected -1, got %d\n", rc8); }
+
+    /* Type 16 (would silently corrupt without validation) */
+    nn_packet_header hdr16 = {
+        .packet_type = 16, .sequence_num = 0, .ack = 0, .ack_bitfield = 0
+    };
+    int rc16 = nn_packet_write(&hdr16, buf);
+    tests_run++;
+    if (rc16 == -1) { tests_passed++; }
+    else { printf("FAIL write_type_16: expected -1, got %d\n", rc16); }
+
+    /* Type 255 (max uint8_t) */
+    nn_packet_header hdr255 = {
+        .packet_type = 255, .sequence_num = 0, .ack = 0, .ack_bitfield = 0
+    };
+    int rc255 = nn_packet_write(&hdr255, buf);
+    tests_run++;
+    if (rc255 == -1) { tests_passed++; }
+    else { printf("FAIL write_type_255: expected -1, got %d\n", rc255); }
+}
+
 int main(void)
 {
     test_payload_header();
@@ -188,6 +243,8 @@ int main(void)
     test_boundary_values();
     test_invalid_type();
     test_truncated();
+    test_padding_resilience();
+    test_invalid_type_write();
 
     printf("%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

@@ -235,6 +235,61 @@ static void test_various_sizes(void)
     }
 }
 
+/* --- Golden known-answer test (catches Poly1305 regressions) --- */
+
+static void test_golden_kat(void)
+{
+    /* Fixed parameters */
+    uint8_t key[NN_CRYPTO_KEY_SIZE];
+    memset(key, 0x42, sizeof(key));
+
+    const char *plaintext =
+        "Ladies and Gentlemen of the class of '99: "
+        "If I could offer you only one tip for the future, "
+        "sunscreen would be it.";
+    size_t plain_len = strlen(plaintext);  /* 114 bytes */
+
+    uint8_t buf[NN_CRYPTO_NONCE_SIZE + 114 + NN_CRYPTO_TAG_SIZE];
+    memcpy(buf + NN_CRYPTO_NONCE_SIZE, plaintext, plain_len);
+
+    int enc_len = nn_crypto_encrypt(key, 7, 0x4E4E, buf, plain_len);
+    ASSERT("golden_enc_len", enc_len == (int)(NN_CRYPTO_NONCE_SIZE + plain_len + NN_CRYPTO_TAG_SIZE));
+
+    /* Golden output — any change to ChaCha20, Poly1305, or AEAD construction
+     * will produce different bytes, catching regressions. */
+    static const uint8_t golden_output[138] = {
+        0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x0c, 0xc8, 0x63, 0xdf, 0xf5, 0x81, 0x93, 0x1f,
+        0xbd, 0xa4, 0x1f, 0xa3, 0xa1, 0x42, 0x31, 0x2b,
+        0x51, 0x5d, 0xd9, 0xf5, 0x72, 0x9b, 0x4f, 0x7a,
+        0x38, 0x6b, 0xaf, 0x1b, 0x89, 0x8b, 0x8f, 0x87,
+        0x86, 0x08, 0x3d, 0x0e, 0x4d, 0x49, 0x12, 0x87,
+        0x22, 0xcb, 0x27, 0x9a, 0x17, 0x6f, 0x93, 0x09,
+        0x54, 0x96, 0xb8, 0x82, 0xba, 0x81, 0x14, 0x26,
+        0x8f, 0xfb, 0xcd, 0x68, 0x70, 0xde, 0xfa, 0xf6,
+        0x12, 0x02, 0x07, 0xc2, 0x52, 0x2b, 0xe0, 0xc2,
+        0x9c, 0x81, 0x03, 0x8a, 0x97, 0x66, 0x00, 0x57,
+        0x7b, 0x86, 0x62, 0x7e, 0xbc, 0xaa, 0xd1, 0xfd,
+        0x56, 0x6f, 0x8e, 0x94, 0xb2, 0xdc, 0x79, 0x76,
+        0x89, 0x3d, 0xda, 0x57, 0xf8, 0x17, 0x1d, 0x80,
+        0x68, 0x49, 0x28, 0x90, 0x18, 0x3a, 0x5f, 0xb1,
+        0x37, 0xd6, 0x09, 0xc4, 0xcf, 0x74, 0x7d, 0xd2,
+        0x4c, 0xd1, 0xa9, 0xfa, 0x19, 0xbe, 0x5b, 0x43,
+        0x9b, 0xef
+    };
+
+    ASSERT("golden_output_match", memcmp(buf, golden_output, 138) == 0);
+
+    /* Verify roundtrip */
+    uint64_t counter;
+    size_t dec_len;
+    int rc = nn_crypto_decrypt(key, 0x4E4E, buf, (size_t)enc_len, &counter, &dec_len);
+    ASSERT_EQ("golden_dec_ok", NN_CRYPTO_OK, rc);
+    ASSERT_EQ("golden_dec_counter", 7, (int)counter);
+    ASSERT_EQ("golden_dec_len", (int)plain_len, (int)dec_len);
+    ASSERT("golden_dec_match", memcmp(buf + NN_CRYPTO_NONCE_SIZE, plaintext, plain_len) == 0);
+}
+
 int main(void)
 {
     test_roundtrip_64();
@@ -246,6 +301,7 @@ int main(void)
     test_empty_plaintext();
     test_different_counters();
     test_various_sizes();
+    test_golden_kat();
 
     printf("%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

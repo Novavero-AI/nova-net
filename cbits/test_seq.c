@@ -255,6 +255,131 @@ static void test_rng(void)
     ASSERT("rng_double < 1", d < 1.0);
 }
 
+/* --- Boundary tests: half-range symmetry, 0xFFFF sentinel, etc. --- */
+
+static void test_seq_gt_half_range_symmetry(void)
+{
+    /* At exactly half-range, 32768 > 0 but NOT 0 > 32768 */
+    ASSERT("half_32768>0", nn_seq_gt(32768, 0));
+    ASSERT("half_!(0>32768)", !nn_seq_gt(0, 32768));
+
+    /* Just past half-range: 32769 is behind 0, not ahead */
+    ASSERT("half_!(32769>0)", !nn_seq_gt(32769, 0));
+    ASSERT("half_0>32769", nn_seq_gt(0, 32769));
+}
+
+static void test_seq_diff_half_range_boundary(void)
+{
+    /* Exact half-range: diff(32768, 0) = 32768 (positive) */
+    ASSERT_EQ("diff_half_pos", 32768, nn_seq_diff(32768, 0));
+    /* Exact negative half-range: diff(0, 32768) = -32768 */
+    ASSERT_EQ("diff_half_neg", -32768, nn_seq_diff(0, 32768));
+
+    /* One past: diff(32769, 0) wraps to negative */
+    ASSERT_EQ("diff_past_half", -32767, nn_seq_diff(32769, 0));
+}
+
+static void test_recv_buf_no_false_positive(void)
+{
+    /* Previously 0xFFFF sentinel caused false positive on fresh buffer */
+    nn_recv_buf buf;
+    nn_recv_buf_init(&buf);
+
+    ASSERT("no_false_65535", !nn_recv_buf_exists(&buf, 65535));
+    ASSERT("no_false_0", !nn_recv_buf_exists(&buf, 0));
+    ASSERT("no_false_255", !nn_recv_buf_exists(&buf, 255));
+
+    /* Insert 0xFFFF and verify it works correctly */
+    nn_recv_buf_insert(&buf, 65535);
+    ASSERT("65535_exists_after_insert", nn_recv_buf_exists(&buf, 65535));
+}
+
+static void test_ack_large_gap(void)
+{
+    /* Gap >= 64 clears entire bitfield */
+    uint16_t remote = 0;
+    uint64_t bits = 0;
+
+    nn_ack_update(&remote, &bits, 0);
+    nn_ack_update(&remote, &bits, 1);
+    ASSERT("pre_gap_bit0", (bits & 1) != 0);
+
+    /* Jump by 64: clears all bits */
+    nn_ack_update(&remote, &bits, 65);
+    ASSERT_EQ("gap64_remote", 65, remote);
+    ASSERT_EQ("gap64_bits_cleared", 0, (long long)bits);
+
+    /* Jump by 100: also clears */
+    nn_ack_update(&remote, &bits, 200);
+    ASSERT_EQ("gap100_bits_cleared", 0, (long long)bits);
+}
+
+static void test_loss_window_full_wrap(void)
+{
+    /* Fill beyond 256 samples — older samples get overwritten */
+    nn_loss_window lw;
+    nn_loss_window_init(&lw);
+
+    /* First 256: all success */
+    for (int i = 0; i < 256; i++)
+        nn_loss_window_record(&lw, 0);
+    ASSERT("wrap_all_good", nn_loss_window_percent(&lw) == 0.0);
+
+    /* Next 256: all lost (overwrites the successes) */
+    for (int i = 0; i < 256; i++)
+        nn_loss_window_record(&lw, 1);
+    ASSERT("wrap_all_bad", nn_loss_window_percent(&lw) == 1.0);
+
+    /* Overwrite half with successes */
+    for (int i = 0; i < 128; i++)
+        nn_loss_window_record(&lw, 0);
+    double pct = nn_loss_window_percent(&lw);
+    ASSERT("wrap_half", pct > 0.49 && pct < 0.51);
+}
+
+static void test_sent_buf_collision(void)
+{
+    /* Two different seqs mapping to same slot (seq 0 and seq 256) */
+    nn_sent_buf buf;
+    nn_sent_buf_init(&buf);
+
+    nn_sent_record rec = {
+        .channel_id = 0, .channel_seq = 10,
+        .send_time_ns = 1000, .size = 64, .nack_count = 0, .occupied = 1
+    };
+
+    nn_sent_buf_insert(&buf, 0, &rec);
+    ASSERT("collision_0_exists", nn_sent_buf_exists(&buf, 0));
+
+    rec.channel_seq = 20;
+    nn_sent_buf_insert(&buf, 256, &rec);
+    /* Seq 0 should be evicted, seq 256 should exist */
+    ASSERT("collision_256_exists", nn_sent_buf_exists(&buf, 256));
+    ASSERT("collision_0_evicted", !nn_sent_buf_exists(&buf, 0));
+    ASSERT_EQ("collision_count", 1, buf.count);
+}
+
+static void test_rng_seed_zero(void)
+{
+    /* Seed 0 should not be degenerate — LCG produces nonzero output */
+    uint64_t state = 0;
+    uint64_t val = nn_rng_next(&state);
+    ASSERT("rng_seed0_nonzero", val != 0);
+    ASSERT("rng_seed0_state_advanced", state != 0);
+}
+
+static void test_rng_double_extremes(void)
+{
+    /* val = 0 should produce 0.0 */
+    double d0 = nn_rng_double(0);
+    ASSERT("rng_double_zero", d0 == 0.0);
+
+    /* val = UINT64_MAX should produce < 1.0 */
+    double dmax = nn_rng_double(UINT64_MAX);
+    ASSERT("rng_double_max_lt_1", dmax < 1.0);
+    ASSERT("rng_double_max_ge_0", dmax >= 0.0);
+}
+
 int main(void)
 {
     test_seq_gt();
@@ -266,6 +391,14 @@ int main(void)
     test_loss_window();
     test_seq_buf();
     test_rng();
+    test_seq_gt_half_range_symmetry();
+    test_seq_diff_half_range_boundary();
+    test_recv_buf_no_false_positive();
+    test_ack_large_gap();
+    test_loss_window_full_wrap();
+    test_sent_buf_collision();
+    test_rng_seed_zero();
+    test_rng_double_extremes();
 
     printf("%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

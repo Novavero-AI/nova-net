@@ -12,7 +12,8 @@
 void
 nn_recv_buf_init(nn_recv_buf *buf)
 {
-    memset(buf->seqs, 0xFF, sizeof(buf->seqs)); /* NN_SEQ_EMPTY = 0xFFFF */
+    memset(buf->seqs, 0, sizeof(buf->seqs));
+    memset(buf->occupied, 0, sizeof(buf->occupied));
     buf->highest = 0;
 }
 
@@ -42,7 +43,7 @@ nn_sent_buf_insert(nn_sent_buf *buf, uint16_t seq,
     if (!was_occupied)
         buf->count++;
 
-    return was_occupied ? 0 : 0; /* no eviction tracking needed at this level */
+    return 0;
 }
 
 const nn_sent_record *
@@ -121,9 +122,9 @@ nn_loss_window_init(nn_loss_window *lw)
 void
 nn_loss_window_record(nn_loss_window *lw, int lost)
 {
-    int idx = lw->index & (LOSS_WINDOW_SIZE - 1);
-    int word = idx >> 6;    /* idx / 64 */
-    int bit  = idx & 63;    /* idx % 64 */
+    uint32_t idx = lw->index & (LOSS_WINDOW_SIZE - 1);
+    uint32_t word = idx >> 6;    /* idx / 64 */
+    uint32_t bit  = idx & 63;    /* idx % 64 */
 
     if (lost)
         lw->bits[word] |=  (1ull << bit);

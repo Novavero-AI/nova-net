@@ -1,12 +1,17 @@
 /*
  * test_crc32c.c — Verify CRC32C against known test vectors
  *
- * Build: cc -std=c99 -Wall -Wextra -Wpedantic -Werror -O2 -march=native -Icbits cbits/nn_crc32c.c cbits/test_crc32c.c -o test_crc32c
+ * Build (hw):  cc -std=c99 -Wall -Wextra -Wpedantic -Werror -O2 -march=native -Icbits cbits/nn_crc32c.c cbits/test_crc32c.c -o test_crc32c
+ * Build (sw):  cc -std=c99 -Wall -Wextra -Wpedantic -Werror -O2 -DNN_CRC32C_TEST_SW -Icbits cbits/nn_crc32c.c cbits/test_crc32c.c -o test_crc32c_sw
  */
 
 #include "nn_crc32c.h"
 #include <stdio.h>
 #include <string.h>
+
+#ifdef NN_CRC32C_TEST_SW
+extern uint32_t nn_crc32c_software_test(const uint8_t *buf, size_t len);
+#endif
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -118,11 +123,57 @@ static void test_various_lengths(void)
     }
 }
 
+#ifdef NN_CRC32C_TEST_SW
+
+static void test_software_fallback(void)
+{
+    /* Verify SW path produces identical results to the primary path */
+    ASSERT_EQ("sw_empty", 0x00000000, nn_crc32c_software_test(NULL, 0));
+
+    const uint8_t digits[] = "123456789";
+    ASSERT_EQ("sw_digits", 0xE3069283, nn_crc32c_software_test(digits, 9));
+
+    uint8_t zeros[32];
+    memset(zeros, 0, sizeof(zeros));
+    ASSERT_EQ("sw_32_zeros", 0x8A9136AA, nn_crc32c_software_test(zeros, 32));
+
+    uint8_t ones[32];
+    memset(ones, 0xFF, sizeof(ones));
+    ASSERT_EQ("sw_32_ones", 0x62A8AB43, nn_crc32c_software_test(ones, 32));
+
+    uint8_t single_zero = 0x00;
+    ASSERT_EQ("sw_single_zero", 0x527D5351, nn_crc32c_software_test(&single_zero, 1));
+
+    uint8_t ascending[32];
+    for (int i = 0; i < 32; i++) ascending[i] = (uint8_t)i;
+    ASSERT_EQ("sw_ascending", 0x46DD794E, nn_crc32c_software_test(ascending, 32));
+
+    /* Cross-check: SW matches HW for all 1-64 byte inputs */
+    uint8_t buf[64];
+    for (size_t len = 1; len <= 64; len++) {
+        for (size_t i = 0; i < len; i++) buf[i] = (uint8_t)(i * 7 + len);
+        uint32_t hw = nn_crc32c(buf, len);
+        uint32_t sw = nn_crc32c_software_test(buf, len);
+        tests_run++;
+        if (hw == sw) {
+            tests_passed++;
+        } else {
+            printf("FAIL sw_cross_%zu: hw=0x%08X sw=0x%08X\n", len, hw, sw);
+        }
+    }
+}
+
+#endif /* NN_CRC32C_TEST_SW */
+
 int main(void)
 {
     test_known_vectors();
     test_append_validate();
     test_various_lengths();
+
+#ifdef NN_CRC32C_TEST_SW
+    test_software_fallback();
+#endif
 
     printf("%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

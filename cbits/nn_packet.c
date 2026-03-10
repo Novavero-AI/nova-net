@@ -10,6 +10,9 @@
 int
 nn_packet_write(const nn_packet_header *hdr, uint8_t *buf)
 {
+    if (hdr->packet_type > NN_PACKET_TYPE_MAX)
+        return -1;
+
     const uint8_t  pt  = hdr->packet_type;
     const uint16_t sn  = hdr->sequence_num;
     const uint16_t ak  = hdr->ack;
