@@ -221,41 +221,42 @@ data ConfigError
 
 -- | Validate a 'NetworkConfig'. Returns all errors found.
 validateConfig :: NetworkConfig -> [ConfigError]
-validateConfig nc = concat
-  [ positive FieldMaxClients (ncMaxClients nc)
-  , positive FieldMaxPending (ncMaxPending nc)
-  , ranged FieldMtu (ncMtu nc) 576 1500
-  , positiveD FieldSendRate (ncSendRate nc)
-  , positiveD FieldMaxPacketRate (ncMaxPacketRate nc)
-  , positiveMs FieldConnectionTimeout (ncConnectionTimeoutMs nc)
-  , positiveMs FieldKeepaliveInterval (ncKeepaliveIntervalMs nc)
-  , positiveMs FieldConnectionRequestTimeout (ncConnectionRequestTimeoutMs nc)
-  , nonNeg FieldConnectionRequestMaxRetries (ncConnectionRequestMaxRetries nc)
-  , positiveMs FieldFragmentTimeout (ncFragmentTimeoutMs nc)
-  , positive FieldMaxFragments (ncMaxFragments nc)
-  , positive FieldMaxReassemblyBufferSize (ncMaxReassemblyBufferSize nc)
-  , positive FieldPacketBufferSize (ncPacketBufferSize nc)
-  , positive FieldAckBufferSize (ncAckBufferSize nc)
-  , positiveMs FieldReliableRetryTime (ncReliableRetryTimeMs nc)
-  , nonNeg FieldMaxReliableRetries (ncMaxReliableRetries nc)
-  , positive FieldMaxInFlight (ncMaxInFlight nc)
-  , ranged FieldMaxChannels (ncMaxChannels nc) 1 8
-  , fraction FieldCongestionThreshold (ncCongestionThreshold nc)
-  , positiveMs FieldCongestionGoodRttThreshold (ncCongestionGoodRttThresholdMs nc)
-  , fraction FieldCongestionBadLossThreshold (ncCongestionBadLossThreshold nc)
-  , positiveMs FieldCongestionRecoveryTime (ncCongestionRecoveryTimeMs nc)
-  , nonNeg FieldDisconnectRetries (ncDisconnectRetries nc)
-  , positiveMs FieldDisconnectRetryTimeout (ncDisconnectRetryTimeoutMs nc)
-  , positive FieldRateLimitPerSecond (ncRateLimitPerSecond nc)
-  , positiveMs FieldDeltaBaselineTimeout (ncDeltaBaselineTimeoutMs nc)
-  , positive FieldMaxBaselineSnapshots (ncMaxBaselineSnapshots nc)
-  , if ncMaxSequenceDistance nc == 0
-      then [ConfigValueTooLow FieldMaxSequenceDistance]
-      else []
-  , maybe [] validateSimConfig (ncSimulation nc)
-  , validateChannelConfig (ncDefaultChannelConfig nc)
-  , concatMap validateChannelConfig (ncChannelConfigs nc)
-  ]
+validateConfig nc =
+  concat
+    [ positive FieldMaxClients (ncMaxClients nc),
+      positive FieldMaxPending (ncMaxPending nc),
+      ranged FieldMtu (ncMtu nc) 576 1500,
+      positiveD FieldSendRate (ncSendRate nc),
+      positiveD FieldMaxPacketRate (ncMaxPacketRate nc),
+      positiveMs FieldConnectionTimeout (ncConnectionTimeoutMs nc),
+      positiveMs FieldKeepaliveInterval (ncKeepaliveIntervalMs nc),
+      positiveMs FieldConnectionRequestTimeout (ncConnectionRequestTimeoutMs nc),
+      nonNeg FieldConnectionRequestMaxRetries (ncConnectionRequestMaxRetries nc),
+      positiveMs FieldFragmentTimeout (ncFragmentTimeoutMs nc),
+      positive FieldMaxFragments (ncMaxFragments nc),
+      positive FieldMaxReassemblyBufferSize (ncMaxReassemblyBufferSize nc),
+      positive FieldPacketBufferSize (ncPacketBufferSize nc),
+      positive FieldAckBufferSize (ncAckBufferSize nc),
+      positiveMs FieldReliableRetryTime (ncReliableRetryTimeMs nc),
+      nonNeg FieldMaxReliableRetries (ncMaxReliableRetries nc),
+      positive FieldMaxInFlight (ncMaxInFlight nc),
+      ranged FieldMaxChannels (ncMaxChannels nc) 1 8,
+      fraction FieldCongestionThreshold (ncCongestionThreshold nc),
+      positiveMs FieldCongestionGoodRttThreshold (ncCongestionGoodRttThresholdMs nc),
+      fraction FieldCongestionBadLossThreshold (ncCongestionBadLossThreshold nc),
+      positiveMs FieldCongestionRecoveryTime (ncCongestionRecoveryTimeMs nc),
+      nonNeg FieldDisconnectRetries (ncDisconnectRetries nc),
+      positiveMs FieldDisconnectRetryTimeout (ncDisconnectRetryTimeoutMs nc),
+      positive FieldRateLimitPerSecond (ncRateLimitPerSecond nc),
+      positiveMs FieldDeltaBaselineTimeout (ncDeltaBaselineTimeoutMs nc),
+      positive FieldMaxBaselineSnapshots (ncMaxBaselineSnapshots nc),
+      if ncMaxSequenceDistance nc == 0
+        then [ConfigValueTooLow FieldMaxSequenceDistance]
+        else [],
+      maybe [] validateSimConfig (ncSimulation nc),
+      validateChannelConfig (ncDefaultChannelConfig nc),
+      concatMap validateChannelConfig (ncChannelConfigs nc)
+    ]
 
 -- Internal validators
 
@@ -292,17 +293,19 @@ fraction f d
   | otherwise = []
 
 validateChannelConfig :: ChannelConfig -> [ConfigError]
-validateChannelConfig cc = concat
-  [ positive FieldCcMaxMessageSize (ccMaxMessageSize cc)
-  , positive FieldCcMessageBufferSize (ccMessageBufferSize cc)
-  , positiveMs FieldCcOrderedBufferTimeout (ccOrderedBufferTimeoutMs cc)
-  , positive FieldCcMaxOrderedBufferSize (ccMaxOrderedBufferSize cc)
-  , nonNeg FieldCcMaxReliableRetries (ccMaxReliableRetries cc)
-  ]
+validateChannelConfig cc =
+  concat
+    [ positive FieldCcMaxMessageSize (ccMaxMessageSize cc),
+      positive FieldCcMessageBufferSize (ccMessageBufferSize cc),
+      positiveMs FieldCcOrderedBufferTimeout (ccOrderedBufferTimeoutMs cc),
+      positive FieldCcMaxOrderedBufferSize (ccMaxOrderedBufferSize cc),
+      nonNeg FieldCcMaxReliableRetries (ccMaxReliableRetries cc)
+    ]
 
 validateSimConfig :: SimulationConfig -> [ConfigError]
-validateSimConfig sc = concat
-  [ fraction FieldSimPacketLoss (simPacketLoss sc)
-  , fraction FieldSimDuplicateChance (simDuplicateChance sc)
-  , fraction FieldSimOutOfOrderChance (simOutOfOrderChance sc)
-  ]
+validateSimConfig sc =
+  concat
+    [ fraction FieldSimPacketLoss (simPacketLoss sc),
+      fraction FieldSimDuplicateChance (simDuplicateChance sc),
+      fraction FieldSimOutOfOrderChance (simOutOfOrderChance sc)
+    ]
