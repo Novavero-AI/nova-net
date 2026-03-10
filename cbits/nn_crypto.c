@@ -12,6 +12,16 @@
 #include "nn_wire.h"
 #include <string.h>
 
+/* Volatile-based wipe to prevent dead-store elimination by the compiler.
+ * Plain memset can be optimised away when the buffer is not read afterwards. */
+static void
+nn_secure_wipe(void *ptr, size_t len)
+{
+    volatile uint8_t *p = (volatile uint8_t *)ptr;
+    while (len--)
+        *p++ = 0;
+}
+
 /* ---------------------------------------------------------------------------
  * ChaCha20 quarter-round (RFC 8439 Section 2.1)
  * ------------------------------------------------------------------------- */
@@ -122,8 +132,8 @@ chacha20_crypt(const uint8_t key[NN_CRYPTO_KEY_SIZE],
     }
 
     /* Wipe keystream from stack */
-    memset(block, 0, sizeof(block));
-    memset(state, 0, sizeof(state));
+    nn_secure_wipe(block, sizeof(block));
+    nn_secure_wipe(state, sizeof(state));
 }
 
 /* ---------------------------------------------------------------------------
@@ -288,7 +298,7 @@ poly1305_finish(poly1305_state *st, const uint8_t *data, size_t remaining,
     nn_write_u32le(tag + 12, (uint32_t)f);
 
     /* Wipe state */
-    memset(st, 0, sizeof(*st));
+    nn_secure_wipe(st, sizeof(*st));
 }
 
 /* ---------------------------------------------------------------------------
@@ -344,7 +354,7 @@ nn_crypto_encrypt(const uint8_t *key, uint64_t counter,
     poly1305_init(&pst, poly_key_block);
 
     /* Process ciphertext blocks */
-    size_t full = plain_len & ~15u;
+    size_t full = plain_len & NN_POLY1305_BLOCK_MASK;
     if (full > 0)
         poly1305_blocks(&pst, plaintext, full, 0);
 
@@ -373,8 +383,8 @@ nn_crypto_encrypt(const uint8_t *key, uint64_t counter,
     poly1305_finish(&pst, NULL, 0, tag);
 
     /* Wipe sensitive data */
-    memset(poly_key_block, 0, sizeof(poly_key_block));
-    memset(state, 0, sizeof(state));
+    nn_secure_wipe(poly_key_block, sizeof(poly_key_block));
+    nn_secure_wipe(state, sizeof(state));
 
     return (int)(NN_CRYPTO_NONCE_SIZE + plain_len + NN_CRYPTO_TAG_SIZE);
 }
@@ -408,7 +418,7 @@ nn_crypto_decrypt(const uint8_t *key, uint32_t protocol_id,
     poly1305_state pst;
     poly1305_init(&pst, poly_key_block);
 
-    size_t full = cipher_len & ~15u;
+    size_t full = cipher_len & NN_POLY1305_BLOCK_MASK;
     if (full > 0)
         poly1305_blocks(&pst, ciphertext, full, 0);
 
@@ -433,8 +443,8 @@ nn_crypto_decrypt(const uint8_t *key, uint32_t protocol_id,
     for (int i = 0; i < NN_CRYPTO_TAG_SIZE; i++)
         diff |= computed_tag[i] ^ recv_tag[i];
 
-    memset(poly_key_block, 0, sizeof(poly_key_block));
-    memset(state, 0, sizeof(state));
+    nn_secure_wipe(poly_key_block, sizeof(poly_key_block));
+    nn_secure_wipe(state, sizeof(state));
 
     if (diff != 0)
         return NN_CRYPTO_ERR_AUTH;

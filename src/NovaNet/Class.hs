@@ -15,13 +15,14 @@ module NovaNet.Class
     -- * Networking
     MonadNetwork (..),
     NetError (..),
+    SendFailure (..),
   )
 where
 
 import Data.ByteString (ByteString)
 import Data.Word (Word64)
 import Network.Socket (SockAddr)
-import NovaNet.Types (MonoTime (..))
+import NovaNet.Types (MonoTime (..), diffNs)
 
 -- ---------------------------------------------------------------------------
 -- Time
@@ -32,29 +33,38 @@ import NovaNet.Types (MonoTime (..))
 class (Monad m) => MonadTime m where
   getMonoTime :: m MonoTime
 
--- | Nanoseconds between @then@ and @now@. Caller must ensure
--- @now >= then@; underflow wraps (Word64 semantics).
+-- | Nanoseconds between @start@ and @now@. Caller must ensure
+-- @now >= start@; underflow wraps (Word64 semantics).
 elapsedNs :: MonoTime -> MonoTime -> Word64
-elapsedNs (MonoTime then_) (MonoTime now) = now - then_
+elapsedNs = diffNs
 {-# INLINE elapsedNs #-}
 
--- | Milliseconds between @then@ and @now@ (sub-ms precision).
+-- | Milliseconds between @start@ and @now@ (sub-ms precision).
 elapsedMs :: MonoTime -> MonoTime -> Double
-elapsedMs then_ now = fromIntegral (elapsedNs then_ now) / 1e6
+elapsedMs start now = fromIntegral (diffNs start now) / 1e6
 {-# INLINE elapsedMs #-}
 
--- | Seconds between @then@ and @now@.
+-- | Seconds between @start@ and @now@.
 elapsedSec :: MonoTime -> MonoTime -> Double
-elapsedSec then_ now = fromIntegral (elapsedNs then_ now) / 1e9
+elapsedSec start now = fromIntegral (diffNs start now) / 1e9
 {-# INLINE elapsedSec #-}
 
 -- ---------------------------------------------------------------------------
 -- Networking
 -- ---------------------------------------------------------------------------
 
+-- | Specific reason a send operation failed.
+data SendFailure
+  = SendBufferFull
+  | SendUnreachable
+  | SendPermissionDenied
+  | SendMessageTooLarge
+  | SendErrno !Int -- OS error code for unrecognized failures
+  deriving (Eq, Show)
+
 -- | Network error from a send or close operation.
 data NetError
-  = NetSendFailed !String
+  = NetSendFailed !SendFailure
   | NetSocketClosed
   | NetTimeout
   deriving (Eq, Show)

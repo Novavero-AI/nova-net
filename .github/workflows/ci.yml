@@ -80,6 +80,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: haskell-actions/setup@v2
+        id: setup-haskell
         with:
           ghc-version: '9.8'
           cabal-version: 'latest'
@@ -87,7 +88,7 @@ jobs:
       - name: Cache Cabal store
         uses: actions/cache@v4
         with:
-          path: ~/.cabal/store
+          path: ${{ steps.setup-haskell.outputs.cabal-store }}
           key: cabal-${{ runner.os }}-v1-${{ hashFiles('nova-net.cabal') }}
           restore-keys: cabal-${{ runner.os }}-v1-
 

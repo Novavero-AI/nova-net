@@ -24,6 +24,10 @@ nn_fragment_read(const uint8_t *buf, size_t buf_len, nn_fragment_header *out)
     out->message_id     = nn_read_u32le(buf);
     out->fragment_index = buf[4];
     out->fragment_count = buf[5];
+
+    if (out->fragment_count == 0 || out->fragment_index >= out->fragment_count)
+        return -1;
+
     return 0;
 }
 

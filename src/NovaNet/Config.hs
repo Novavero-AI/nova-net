@@ -17,9 +17,14 @@ module NovaNet.Config
     ConfigField (..),
     ConfigError (..),
     validateConfig,
+
+    -- * Protocol constants
+    minMtu,
+    maxMtu,
   )
 where
 
+import Data.Bits ((.&.))
 import Data.Word (Word16, Word32, Word8)
 import NovaNet.Types
 
@@ -32,7 +37,7 @@ data ChannelConfig = ChannelConfig
   { ccDeliveryMode :: !DeliveryMode,
     ccMaxMessageSize :: !Int,
     ccMessageBufferSize :: !Int,
-    ccBlockOnFull :: !Bool,
+    ccFullBufferPolicy :: !FullBufferPolicy,
     ccOrderedBufferTimeoutMs :: !Milliseconds,
     ccMaxOrderedBufferSize :: !Int,
     ccMaxReliableRetries :: !Int,
@@ -45,14 +50,34 @@ defaultChannelConfig :: ChannelConfig
 defaultChannelConfig =
   ChannelConfig
     { ccDeliveryMode = ReliableOrdered,
-      ccMaxMessageSize = 1024,
-      ccMessageBufferSize = 256,
-      ccBlockOnFull = False,
-      ccOrderedBufferTimeoutMs = Milliseconds 5000.0,
-      ccMaxOrderedBufferSize = 64,
-      ccMaxReliableRetries = 10,
-      ccPriority = 128
+      ccMaxMessageSize = defaultCcMaxMessageSize,
+      ccMessageBufferSize = defaultCcMessageBufferSize,
+      ccFullBufferPolicy = DropOnFull,
+      ccOrderedBufferTimeoutMs = defaultCcOrderedBufferTimeoutMs,
+      ccMaxOrderedBufferSize = defaultCcMaxOrderedBufferSize,
+      ccMaxReliableRetries = defaultCcMaxReliableRetries,
+      ccPriority = defaultCcPriority
     }
+
+-- Channel config defaults (internal)
+
+defaultCcMaxMessageSize :: Int
+defaultCcMaxMessageSize = 1024
+
+defaultCcMessageBufferSize :: Int
+defaultCcMessageBufferSize = 256
+
+defaultCcOrderedBufferTimeoutMs :: Milliseconds
+defaultCcOrderedBufferTimeoutMs = Milliseconds 5000.0
+
+defaultCcMaxOrderedBufferSize :: Int
+defaultCcMaxOrderedBufferSize = 64
+
+defaultCcMaxReliableRetries :: Int
+defaultCcMaxReliableRetries = 10
+
+defaultCcPriority :: Word8
+defaultCcPriority = 128
 
 -- ---------------------------------------------------------------------------
 -- Simulation configuration
@@ -110,14 +135,14 @@ data NetworkConfig = NetworkConfig
     ncCongestionGoodRttThresholdMs :: !Milliseconds,
     ncCongestionBadLossThreshold :: !Double,
     ncCongestionRecoveryTimeMs :: !Milliseconds,
-    ncUseCwndCongestion :: !Bool,
+    ncCongestionMode :: !CongestionMode,
     -- Disconnect
     ncDisconnectRetries :: !Int,
     ncDisconnectRetryTimeoutMs :: !Milliseconds,
     -- Security
     ncRateLimitPerSecond :: !Int,
     ncEncryptionKey :: !(Maybe EncryptionKey),
-    ncEnableConnectionMigration :: !Bool,
+    ncMigrationPolicy :: !MigrationPolicy,
     -- Replication
     ncDeltaBaselineTimeoutMs :: !Milliseconds,
     ncMaxBaselineSnapshots :: !Int,
@@ -126,45 +151,153 @@ data NetworkConfig = NetworkConfig
   }
   deriving (Show)
 
+-- ---------------------------------------------------------------------------
+-- Protocol constants
+-- ---------------------------------------------------------------------------
+
+-- | Minimum MTU (RFC 791 minimum IPv4 datagram).
+minMtu :: Int
+minMtu = 576
+
+-- | Maximum MTU (UDP maximum payload size).
+maxMtu :: Int
+maxMtu = 65535
+
+-- ---------------------------------------------------------------------------
+-- Network config defaults (internal)
+-- ---------------------------------------------------------------------------
+
+defaultProtocolId :: Word32
+defaultProtocolId = 0x4E4E4554 -- "NNET"
+
+defaultMaxClients :: Int
+defaultMaxClients = 64
+
+defaultMaxPending :: Int
+defaultMaxPending = 256
+
+defaultConnectionTimeoutMs :: Milliseconds
+defaultConnectionTimeoutMs = Milliseconds 10000.0
+
+defaultKeepaliveIntervalMs :: Milliseconds
+defaultKeepaliveIntervalMs = Milliseconds 1000.0
+
+defaultConnectionRequestTimeoutMs :: Milliseconds
+defaultConnectionRequestTimeoutMs = Milliseconds 5000.0
+
+defaultConnectionRequestMaxRetries :: Int
+defaultConnectionRequestMaxRetries = 5
+
+defaultMtu :: Int
+defaultMtu = 1200
+
+defaultSendRate :: Double
+defaultSendRate = 60.0
+
+defaultMaxPacketRate :: Double
+defaultMaxPacketRate = 120.0
+
+defaultFragmentThreshold :: Int
+defaultFragmentThreshold = 1024
+
+defaultFragmentTimeoutMs :: Milliseconds
+defaultFragmentTimeoutMs = Milliseconds 5000.0
+
+defaultMaxFragments :: Int
+defaultMaxFragments = 255
+
+defaultMaxReassemblyBufferSize :: Int
+defaultMaxReassemblyBufferSize = 1024 * 1024 -- 1 MiB
+
+defaultPacketBufferSize :: Int
+defaultPacketBufferSize = 256
+
+defaultAckBufferSize :: Int
+defaultAckBufferSize = 256
+
+defaultMaxSequenceDistance :: Word16
+defaultMaxSequenceDistance = 32768
+
+defaultReliableRetryTimeMs :: Milliseconds
+defaultReliableRetryTimeMs = Milliseconds 100.0
+
+defaultMaxReliableRetries :: Int
+defaultMaxReliableRetries = 10
+
+defaultMaxInFlight :: Int
+defaultMaxInFlight = 256
+
+defaultMaxChannels :: Int
+defaultMaxChannels = 8
+
+defaultCongestionThreshold :: Double
+defaultCongestionThreshold = 0.1
+
+defaultCongestionGoodRttThresholdMs :: Milliseconds
+defaultCongestionGoodRttThresholdMs = Milliseconds 250.0
+
+defaultCongestionBadLossThreshold :: Double
+defaultCongestionBadLossThreshold = 0.1
+
+defaultCongestionRecoveryTimeMs :: Milliseconds
+defaultCongestionRecoveryTimeMs = Milliseconds 10000.0
+
+defaultDisconnectRetries :: Int
+defaultDisconnectRetries = 3
+
+defaultDisconnectRetryTimeoutMs :: Milliseconds
+defaultDisconnectRetryTimeoutMs = Milliseconds 500.0
+
+defaultRateLimitPerSecond :: Int
+defaultRateLimitPerSecond = 10
+
+defaultDeltaBaselineTimeoutMs :: Milliseconds
+defaultDeltaBaselineTimeoutMs = Milliseconds 2000.0
+
+defaultMaxBaselineSnapshots :: Int
+defaultMaxBaselineSnapshots = 32
+
+-- ---------------------------------------------------------------------------
+
 -- | Sensible defaults for all parameters.
 defaultNetworkConfig :: NetworkConfig
 defaultNetworkConfig =
   NetworkConfig
-    { ncProtocolId = 0x4E4E4554, -- "NNET"
-      ncMaxClients = 64,
-      ncMaxPending = 256,
-      ncConnectionTimeoutMs = Milliseconds 10000.0,
-      ncKeepaliveIntervalMs = Milliseconds 1000.0,
-      ncConnectionRequestTimeoutMs = Milliseconds 5000.0,
-      ncConnectionRequestMaxRetries = 5,
-      ncMtu = 1200,
-      ncSendRate = 60.0,
-      ncMaxPacketRate = 120.0,
-      ncFragmentThreshold = 1024,
-      ncFragmentTimeoutMs = Milliseconds 5000.0,
-      ncMaxFragments = 255,
-      ncMaxReassemblyBufferSize = 1048576, -- 1 MB
-      ncPacketBufferSize = 256,
-      ncAckBufferSize = 256,
-      ncMaxSequenceDistance = 32768,
-      ncReliableRetryTimeMs = Milliseconds 100.0,
-      ncMaxReliableRetries = 10,
-      ncMaxInFlight = 256,
-      ncMaxChannels = 8,
+    { ncProtocolId = defaultProtocolId,
+      ncMaxClients = defaultMaxClients,
+      ncMaxPending = defaultMaxPending,
+      ncConnectionTimeoutMs = defaultConnectionTimeoutMs,
+      ncKeepaliveIntervalMs = defaultKeepaliveIntervalMs,
+      ncConnectionRequestTimeoutMs = defaultConnectionRequestTimeoutMs,
+      ncConnectionRequestMaxRetries = defaultConnectionRequestMaxRetries,
+      ncMtu = defaultMtu,
+      ncSendRate = defaultSendRate,
+      ncMaxPacketRate = defaultMaxPacketRate,
+      ncFragmentThreshold = defaultFragmentThreshold,
+      ncFragmentTimeoutMs = defaultFragmentTimeoutMs,
+      ncMaxFragments = defaultMaxFragments,
+      ncMaxReassemblyBufferSize = defaultMaxReassemblyBufferSize,
+      ncPacketBufferSize = defaultPacketBufferSize,
+      ncAckBufferSize = defaultAckBufferSize,
+      ncMaxSequenceDistance = defaultMaxSequenceDistance,
+      ncReliableRetryTimeMs = defaultReliableRetryTimeMs,
+      ncMaxReliableRetries = defaultMaxReliableRetries,
+      ncMaxInFlight = defaultMaxInFlight,
+      ncMaxChannels = defaultMaxChannels,
       ncDefaultChannelConfig = defaultChannelConfig,
       ncChannelConfigs = [],
-      ncCongestionThreshold = 0.1,
-      ncCongestionGoodRttThresholdMs = Milliseconds 250.0,
-      ncCongestionBadLossThreshold = 0.1,
-      ncCongestionRecoveryTimeMs = Milliseconds 10000.0,
-      ncUseCwndCongestion = False,
-      ncDisconnectRetries = 3,
-      ncDisconnectRetryTimeoutMs = Milliseconds 500.0,
-      ncRateLimitPerSecond = 10,
+      ncCongestionThreshold = defaultCongestionThreshold,
+      ncCongestionGoodRttThresholdMs = defaultCongestionGoodRttThresholdMs,
+      ncCongestionBadLossThreshold = defaultCongestionBadLossThreshold,
+      ncCongestionRecoveryTimeMs = defaultCongestionRecoveryTimeMs,
+      ncCongestionMode = BinaryAIMD,
+      ncDisconnectRetries = defaultDisconnectRetries,
+      ncDisconnectRetryTimeoutMs = defaultDisconnectRetryTimeoutMs,
+      ncRateLimitPerSecond = defaultRateLimitPerSecond,
       ncEncryptionKey = Nothing,
-      ncEnableConnectionMigration = True,
-      ncDeltaBaselineTimeoutMs = Milliseconds 2000.0,
-      ncMaxBaselineSnapshots = 32,
+      ncMigrationPolicy = MigrationDisabled,
+      ncDeltaBaselineTimeoutMs = defaultDeltaBaselineTimeoutMs,
+      ncMaxBaselineSnapshots = defaultMaxBaselineSnapshots,
       ncSimulation = Nothing
     }
 
@@ -192,6 +325,7 @@ data ConfigField
   | FieldKeepaliveInterval
   | FieldConnectionRequestTimeout
   | FieldConnectionRequestMaxRetries
+  | FieldFragmentThreshold
   | FieldFragmentTimeout
   | FieldReliableRetryTime
   | FieldMaxReliableRetries
@@ -205,6 +339,10 @@ data ConfigField
   | FieldSimPacketLoss
   | FieldSimDuplicateChance
   | FieldSimOutOfOrderChance
+  | FieldSimLatency
+  | FieldSimJitter
+  | FieldSimOutOfOrderMaxDelay
+  | FieldSimBandwidthLimit
   | FieldCcMaxMessageSize
   | FieldCcMessageBufferSize
   | FieldCcOrderedBufferTimeout
@@ -217,26 +355,33 @@ data ConfigError
   = ConfigValueTooLow !ConfigField
   | ConfigValueTooHigh !ConfigField
   | ConfigValueNaN !ConfigField
+  | ConfigNotPowerOfTwo !ConfigField
+  | ConfigKeepaliveExceedsTimeout
+  | ConfigFragmentExceedsMtu
+  | ConfigMigrationRequiresEncryption
+  | ConfigTooManyChannelConfigs
   deriving (Eq, Show)
 
 -- | Validate a 'NetworkConfig'. Returns all errors found.
 validateConfig :: NetworkConfig -> [ConfigError]
 validateConfig nc =
   concat
-    [ positive FieldMaxClients (ncMaxClients nc),
+    [ -- Single-field validations
+      positive FieldMaxClients (ncMaxClients nc),
       positive FieldMaxPending (ncMaxPending nc),
-      ranged FieldMtu (ncMtu nc) 576 1500,
+      ranged FieldMtu (ncMtu nc) minMtu maxMtu,
       positiveD FieldSendRate (ncSendRate nc),
       positiveD FieldMaxPacketRate (ncMaxPacketRate nc),
       positiveMs FieldConnectionTimeout (ncConnectionTimeoutMs nc),
       positiveMs FieldKeepaliveInterval (ncKeepaliveIntervalMs nc),
       positiveMs FieldConnectionRequestTimeout (ncConnectionRequestTimeoutMs nc),
       nonNeg FieldConnectionRequestMaxRetries (ncConnectionRequestMaxRetries nc),
+      positive FieldFragmentThreshold (ncFragmentThreshold nc),
       positiveMs FieldFragmentTimeout (ncFragmentTimeoutMs nc),
       positive FieldMaxFragments (ncMaxFragments nc),
       positive FieldMaxReassemblyBufferSize (ncMaxReassemblyBufferSize nc),
-      positive FieldPacketBufferSize (ncPacketBufferSize nc),
-      positive FieldAckBufferSize (ncAckBufferSize nc),
+      powerOfTwo FieldPacketBufferSize (ncPacketBufferSize nc),
+      powerOfTwo FieldAckBufferSize (ncAckBufferSize nc),
       positiveMs FieldReliableRetryTime (ncReliableRetryTimeMs nc),
       nonNeg FieldMaxReliableRetries (ncMaxReliableRetries nc),
       positive FieldMaxInFlight (ncMaxInFlight nc),
@@ -250,9 +395,23 @@ validateConfig nc =
       positive FieldRateLimitPerSecond (ncRateLimitPerSecond nc),
       positiveMs FieldDeltaBaselineTimeout (ncDeltaBaselineTimeoutMs nc),
       positive FieldMaxBaselineSnapshots (ncMaxBaselineSnapshots nc),
-      if ncMaxSequenceDistance nc == 0
-        then [ConfigValueTooLow FieldMaxSequenceDistance]
-        else [],
+      [ConfigValueTooLow FieldMaxSequenceDistance | ncMaxSequenceDistance nc == 0],
+      -- Cross-field validations
+      [ ConfigKeepaliveExceedsTimeout
+      | unMilliseconds (ncKeepaliveIntervalMs nc)
+          >= unMilliseconds (ncConnectionTimeoutMs nc)
+      ],
+      [ ConfigFragmentExceedsMtu
+      | ncFragmentThreshold nc > ncMtu nc
+      ],
+      [ ConfigMigrationRequiresEncryption
+      | ncMigrationPolicy nc == MigrationEnabled,
+        Nothing <- [ncEncryptionKey nc]
+      ],
+      [ ConfigTooManyChannelConfigs
+      | length (ncChannelConfigs nc) > ncMaxChannels nc
+      ],
+      -- Nested validations
       maybe [] validateSimConfig (ncSimulation nc),
       validateChannelConfig (ncDefaultChannelConfig nc),
       concatMap validateChannelConfig (ncChannelConfigs nc)
@@ -285,12 +444,23 @@ positiveD f d
 positiveMs :: ConfigField -> Milliseconds -> [ConfigError]
 positiveMs f (Milliseconds ms) = positiveD f ms
 
+nonNegMs :: ConfigField -> Milliseconds -> [ConfigError]
+nonNegMs f (Milliseconds ms)
+  | isNaN ms || isInfinite ms = [ConfigValueNaN f]
+  | ms >= 0.0 = []
+  | otherwise = [ConfigValueTooLow f]
+
 fraction :: ConfigField -> Double -> [ConfigError]
 fraction f d
   | isNaN d = [ConfigValueNaN f]
   | d < 0.0 = [ConfigValueTooLow f]
   | d > 1.0 = [ConfigValueTooHigh f]
   | otherwise = []
+
+powerOfTwo :: ConfigField -> Int -> [ConfigError]
+powerOfTwo f n
+  | n > 0 && (n .&. (n - 1)) == 0 = []
+  | otherwise = [ConfigNotPowerOfTwo f]
 
 validateChannelConfig :: ChannelConfig -> [ConfigError]
 validateChannelConfig cc =
@@ -307,5 +477,9 @@ validateSimConfig sc =
   concat
     [ fraction FieldSimPacketLoss (simPacketLoss sc),
       fraction FieldSimDuplicateChance (simDuplicateChance sc),
-      fraction FieldSimOutOfOrderChance (simOutOfOrderChance sc)
+      fraction FieldSimOutOfOrderChance (simOutOfOrderChance sc),
+      nonNegMs FieldSimLatency (simLatencyMs sc),
+      nonNegMs FieldSimJitter (simJitterMs sc),
+      nonNegMs FieldSimOutOfOrderMaxDelay (simOutOfOrderMaxDelayMs sc),
+      nonNeg FieldSimBandwidthLimit (simBandwidthLimitBytesPerSec sc)
     ]

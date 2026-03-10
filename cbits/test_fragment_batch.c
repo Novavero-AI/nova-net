@@ -54,6 +54,34 @@ static void test_fragment_header_truncated(void)
     ASSERT_EQ("frag_hdr_short", -1, nn_fragment_read(buf, 3, &out));
 }
 
+static void test_fragment_header_invalid(void)
+{
+    uint8_t buf[NN_FRAGMENT_HEADER_SIZE];
+
+    /* fragment_count = 0 → invalid */
+    nn_fragment_header hdr_zero = { .message_id = 1, .fragment_index = 0, .fragment_count = 0 };
+    nn_fragment_write(&hdr_zero, buf);
+    nn_fragment_header out;
+    ASSERT_EQ("frag_hdr_count_zero", -1, nn_fragment_read(buf, NN_FRAGMENT_HEADER_SIZE, &out));
+
+    /* fragment_index >= fragment_count → invalid */
+    nn_fragment_header hdr_oob = { .message_id = 2, .fragment_index = 5, .fragment_count = 5 };
+    nn_fragment_write(&hdr_oob, buf);
+    ASSERT_EQ("frag_hdr_idx_eq_cnt", -1, nn_fragment_read(buf, NN_FRAGMENT_HEADER_SIZE, &out));
+
+    /* fragment_index > fragment_count → invalid */
+    nn_fragment_header hdr_far = { .message_id = 3, .fragment_index = 10, .fragment_count = 3 };
+    nn_fragment_write(&hdr_far, buf);
+    ASSERT_EQ("frag_hdr_idx_gt_cnt", -1, nn_fragment_read(buf, NN_FRAGMENT_HEADER_SIZE, &out));
+
+    /* Max valid: index=254, count=255 → valid */
+    nn_fragment_header hdr_max = { .message_id = 4, .fragment_index = 254, .fragment_count = 255 };
+    nn_fragment_write(&hdr_max, buf);
+    ASSERT_EQ("frag_hdr_max_valid", 0, nn_fragment_read(buf, NN_FRAGMENT_HEADER_SIZE, &out));
+    ASSERT_EQ("frag_hdr_max_idx", 254, out.fragment_index);
+    ASSERT_EQ("frag_hdr_max_cnt", 255, out.fragment_count);
+}
+
 /* --- Fragment count --- */
 
 static void test_fragment_count(void)
@@ -195,6 +223,7 @@ int main(void)
 {
     test_fragment_header_roundtrip();
     test_fragment_header_truncated();
+    test_fragment_header_invalid();
     test_fragment_count();
     test_fragment_build();
     test_batch_roundtrip();

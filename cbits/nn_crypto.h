@@ -42,6 +42,12 @@
 /** ChaCha20 block size in bytes. */
 #define NN_CHACHA20_BLOCK_SIZE  64
 
+/** Poly1305 block size in bytes. */
+#define NN_POLY1305_BLOCK_SIZE  16
+
+/** Mask to round down to Poly1305 block alignment. */
+#define NN_POLY1305_BLOCK_MASK  (~(size_t)(NN_POLY1305_BLOCK_SIZE - 1))
+
 /* ---------------------------------------------------------------------------
  * Error codes
  * ------------------------------------------------------------------------- */

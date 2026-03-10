@@ -52,7 +52,7 @@ fromCInt 0 = CryptoOk
 fromCInt (-1) = CryptoErrKey
 fromCInt (-2) = CryptoErrAuth
 fromCInt (-3) = CryptoErrShort
-fromCInt _ = CryptoErrAuth
+fromCInt _ = CryptoErrAuth -- Unknown C error code; auth failure is the safe default
 {-# INLINE fromCInt #-}
 
 foreign import ccall unsafe "nn_ffi_encrypt"

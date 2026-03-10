@@ -9,17 +9,25 @@
 -- connection states, and peer events.
 module NovaNet.Types
   ( -- * Identifiers
-    ChannelId (..),
+    ChannelId,
+    unChannelId,
+    mkChannelId,
     channelIdToInt,
     SequenceNum (..),
+    initialSeq,
+    nextSeq,
     MessageId (..),
+    initialMessageId,
     nextMessageId,
     PeerId (..),
     NonceCounter (..),
+    initialNonce,
     nextNonce,
 
     -- * Time
     MonoTime (..),
+    addNs,
+    diffNs,
     Milliseconds (..),
     msToNs,
     nsToMs,
@@ -45,12 +53,20 @@ module NovaNet.Types
     -- * Events
     PeerEvent (..),
 
+    -- * Config policies
+    FullBufferPolicy (..),
+    CongestionMode (..),
+    MigrationPolicy (..),
+
     -- * Encryption
-    EncryptionKey (..),
+    EncryptionKey,
+    unEncryptionKey,
+    mkEncryptionKey,
   )
 where
 
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import Data.Word (Word16, Word32, Word64, Word8)
 import Network.Socket (SockAddr)
 
@@ -59,23 +75,47 @@ import Network.Socket (SockAddr)
 -- ---------------------------------------------------------------------------
 
 -- | Channel identifier (0-7, 3 bits on wire).
+-- Use 'mkChannelId' to construct; values outside 0-7 are rejected.
 newtype ChannelId = ChannelId {unChannelId :: Word8}
   deriving (Eq, Ord, Show)
 
--- | Convert to 'Int' for 'IntMap' indexing.
+-- | Construct a 'ChannelId'. Returns 'Nothing' if the value exceeds 7.
+mkChannelId :: Word8 -> Maybe ChannelId
+mkChannelId w
+  | w <= 7 = Just (ChannelId w)
+  | otherwise = Nothing
+{-# INLINE mkChannelId #-}
+
+-- | Convert to 'Int' for indexing.
 channelIdToInt :: ChannelId -> Int
 channelIdToInt (ChannelId c) = fromIntegral c
 {-# INLINE channelIdToInt #-}
 
 -- | Packet sequence number with wraparound semantics.
--- 'Num' instance wraps at 16-bit boundaries, matching the wire format.
+-- No 'Ord' instance: use 'NovaNet.FFI.Seq.seqGt' for circular comparison.
+-- No 'Num' instance: use 'nextSeq' to advance.
 newtype SequenceNum = SequenceNum {unSequenceNum :: Word16}
-  deriving (Eq, Ord, Show, Num)
+  deriving (Eq, Show)
 
--- | Fragment message identifier. Not a number — use 'nextMessageId'
--- to advance.
+-- | The initial sequence number (0).
+initialSeq :: SequenceNum
+initialSeq = SequenceNum 0
+{-# INLINE initialSeq #-}
+
+-- | Advance to the next sequence number (wraps at 16-bit boundary).
+nextSeq :: SequenceNum -> SequenceNum
+nextSeq (SequenceNum s) = SequenceNum (s + 1)
+{-# INLINE nextSeq #-}
+
+-- | Fragment message identifier.
+-- Use 'initialMessageId' and 'nextMessageId' to construct and advance.
 newtype MessageId = MessageId {unMessageId :: Word32}
   deriving (Eq, Ord, Show)
+
+-- | The initial message ID (0).
+initialMessageId :: MessageId
+initialMessageId = MessageId 0
+{-# INLINE initialMessageId #-}
 
 -- | Advance to the next message ID (wraps at 32-bit boundary).
 nextMessageId :: MessageId -> MessageId
@@ -87,9 +127,14 @@ newtype PeerId = PeerId {unPeerId :: SockAddr}
   deriving (Eq, Ord, Show)
 
 -- | Monotonically increasing nonce counter for anti-replay.
--- Not a number — use 'nextNonce' to advance.
+-- Use 'initialNonce' and 'nextNonce' to construct and advance.
 newtype NonceCounter = NonceCounter {unNonceCounter :: Word64}
   deriving (Eq, Ord, Show)
+
+-- | The initial nonce counter (0).
+initialNonce :: NonceCounter
+initialNonce = NonceCounter 0
+{-# INLINE initialNonce #-}
 
 -- | Advance to the next nonce value.
 nextNonce :: NonceCounter -> NonceCounter
@@ -100,14 +145,26 @@ nextNonce (NonceCounter n) = NonceCounter (n + 1)
 -- Time
 -- ---------------------------------------------------------------------------
 
--- | Monotonic time in nanoseconds. 'Num' instance enables @t + delta@.
+-- | Monotonic time in nanoseconds. Use 'addNs' and 'diffNs' for
+-- arithmetic instead of raw 'Num' operations.
 newtype MonoTime = MonoTime {unMonoTime :: Word64}
-  deriving (Eq, Ord, Show, Num)
+  deriving (Eq, Ord, Show)
+
+-- | Advance a timestamp by a duration in nanoseconds.
+addNs :: MonoTime -> Word64 -> MonoTime
+addNs (MonoTime t) delta = MonoTime (t + delta)
+{-# INLINE addNs #-}
+
+-- | Nanoseconds between two timestamps. Caller must ensure
+-- @now >= start@; underflow wraps (Word64 semantics).
+diffNs :: MonoTime -> MonoTime -> Word64
+diffNs (MonoTime start) (MonoTime now) = now - start
+{-# INLINE diffNs #-}
 
 -- | Type-safe milliseconds to prevent unit mixing with seconds or
 -- nanoseconds. All timeout and interval config fields use this type.
 newtype Milliseconds = Milliseconds {unMilliseconds :: Double}
-  deriving (Eq, Ord, Show, Num, Fractional)
+  deriving (Eq, Ord, Show, Num)
 
 -- | Convert milliseconds to nanoseconds (for 'MonoTime' arithmetic).
 msToNs :: Milliseconds -> Word64
@@ -165,20 +222,26 @@ isReliable :: DeliveryMode -> Bool
 isReliable ReliableUnordered = True
 isReliable ReliableOrdered = True
 isReliable ReliableSequenced = True
-isReliable _ = False
+isReliable Unreliable = False
+isReliable UnreliableSequenced = False
 {-# INLINE isReliable #-}
 
 -- | Does this mode drop out-of-order messages?
 isSequenced :: DeliveryMode -> Bool
 isSequenced UnreliableSequenced = True
 isSequenced ReliableSequenced = True
-isSequenced _ = False
+isSequenced Unreliable = False
+isSequenced ReliableUnordered = False
+isSequenced ReliableOrdered = False
 {-# INLINE isSequenced #-}
 
 -- | Does this mode buffer and reorder for strict FIFO delivery?
 isOrdered :: DeliveryMode -> Bool
 isOrdered ReliableOrdered = True
-isOrdered _ = False
+isOrdered Unreliable = False
+isOrdered UnreliableSequenced = False
+isOrdered ReliableUnordered = False
+isOrdered ReliableSequenced = False
 {-# INLINE isOrdered #-}
 
 -- ---------------------------------------------------------------------------
@@ -240,12 +303,42 @@ data PeerEvent
   deriving (Eq, Show)
 
 -- ---------------------------------------------------------------------------
+-- Config policies
+-- ---------------------------------------------------------------------------
+
+-- | Policy when a channel's message buffer is full.
+data FullBufferPolicy
+  = DropOnFull
+  | BlockOnFull
+  deriving (Eq, Ord, Show)
+
+-- | Congestion control mode.
+data CongestionMode
+  = BinaryAIMD
+  | CwndTcpLike
+  deriving (Eq, Ord, Show)
+
+-- | Connection migration policy.
+data MigrationPolicy
+  = MigrationEnabled
+  | MigrationDisabled
+  deriving (Eq, Ord, Show)
+
+-- ---------------------------------------------------------------------------
 -- Encryption
 -- ---------------------------------------------------------------------------
 
 -- | 256-bit encryption key for ChaCha20-Poly1305.
+-- Use 'mkEncryptionKey' to construct; only accepts exactly 32 bytes.
 newtype EncryptionKey = EncryptionKey {unEncryptionKey :: ByteString}
   deriving (Eq)
+
+-- | Construct an 'EncryptionKey'. Returns 'Nothing' if the ByteString
+-- is not exactly 32 bytes.
+mkEncryptionKey :: ByteString -> Maybe EncryptionKey
+mkEncryptionKey bs
+  | BS.length bs == 32 = Just (EncryptionKey bs)
+  | otherwise = Nothing
 
 instance Show EncryptionKey where
   show _ = "EncryptionKey <redacted>"
