@@ -5,11 +5,6 @@ module NovaNet.FFI.Packet
   ( -- * Constants
     packetHeaderSize,
 
-    -- * Packet types
-    PacketType (..),
-    packetTypeToWord8,
-    packetTypeFromWord8,
-
     -- * Write / Read
     packetWrite,
     packetRead,
@@ -25,28 +20,6 @@ import Foreign.Storable (peek)
 -- | Packet header size in bytes.
 packetHeaderSize :: Int
 packetHeaderSize = 9
-
--- | Packet type tag (4 bits on wire).
-data PacketType
-  = ConnectionRequest
-  | ConnectionAccepted
-  | ConnectionDenied
-  | Payload
-  | Disconnect
-  | Keepalive
-  | ConnectionChallenge
-  | ConnectionResponse
-  deriving (Eq, Show, Enum, Bounded)
-
-packetTypeToWord8 :: PacketType -> Word8
-packetTypeToWord8 = fromIntegral . fromEnum
-{-# INLINE packetTypeToWord8 #-}
-
-packetTypeFromWord8 :: Word8 -> Maybe PacketType
-packetTypeFromWord8 w
-  | w <= fromIntegral (fromEnum (maxBound :: PacketType)) = Just (toEnum (fromIntegral w))
-  | otherwise = Nothing
-{-# INLINE packetTypeFromWord8 #-}
 
 foreign import ccall unsafe "nn_ffi_packet_write"
   c_packet_write :: Word8 -> Word16 -> Word16 -> Word32 -> Ptr Word8 -> IO CInt

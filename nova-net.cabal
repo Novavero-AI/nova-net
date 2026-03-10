@@ -26,6 +26,9 @@ extra-doc-files:
 library
   exposed-modules:
     NovaNet
+    NovaNet.Class
+    NovaNet.Config
+    NovaNet.Types
     NovaNet.FFI.Packet
     NovaNet.FFI.CRC32C
     NovaNet.FFI.Seq
@@ -33,7 +36,6 @@ library
     NovaNet.FFI.Batch
     NovaNet.FFI.Crypto
     NovaNet.FFI.Bandwidth
-    NovaNet.Types
 
   c-sources:
     cbits/nn_packet.c
