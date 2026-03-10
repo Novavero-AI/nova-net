@@ -32,12 +32,14 @@ module NovaNet
     -- * Protocol modules
     module NovaNet.Reliability,
     module NovaNet.Channel,
+    module NovaNet.Congestion,
   )
 where
 
 import NovaNet.Channel
 import NovaNet.Class
 import NovaNet.Config
+import NovaNet.Congestion
 import NovaNet.FFI.AckProcess
 import NovaNet.FFI.Bandwidth
 import NovaNet.FFI.Batch

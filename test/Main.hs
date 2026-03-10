@@ -5,12 +5,14 @@ module Main (main) where
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
 import Data.IORef
+import Data.Int (Int64)
 import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Marshal.Array (pokeArray)
 import Foreign.Ptr (plusPtr)
 import NovaNet.Channel
 import NovaNet.Config
+import NovaNet.Congestion
 import NovaNet.FFI.Bandwidth (bandwidthBps, bandwidthRecord, newBandwidthTracker)
 import NovaNet.FFI.CRC32C (crc32c)
 import NovaNet.FFI.Crypto (cryptoNonceSize, decrypt, encrypt)
@@ -88,6 +90,9 @@ main = do
 
   -- Channel
   testChannel t
+
+  -- Congestion
+  testCongestion t
 
   TestState ran passed <- readIORef t
   putStrLn $ show passed ++ "/" ++ show ran ++ " tests passed"
@@ -651,3 +656,61 @@ testChannel t = do
   let chReset = resetChannel chRO6
   assertEqual t "ch_reset_sent" (0 :: Word64) (chStatsSent chReset)
   assertEqual t "ch_reset_qlen" 0 (channelSendQueueLen chReset)
+
+-- ---------------------------------------------------------------------------
+-- Congestion tests
+-- ---------------------------------------------------------------------------
+
+testCongestion :: T -> IO ()
+testCongestion t = do
+  let now = MonoTime 1000000000 -- 1 second
+      ms250 = 250000000 :: Int64
+
+  -- AIMD: create and verify initial state
+  aimd <- newCongestionController BinaryAIMD 60.0 0.1 ms250 1200
+  canSend0 <- congestionCanSend aimd 0
+  assert t "cong_aimd_cannot_send_init" (not canSend0)
+
+  -- AIMD: tick refills budget
+  congestionTick aimd 1.0 0.0 50000000 now
+  canSend1 <- congestionCanSend aimd 0
+  assert t "cong_aimd_can_send_after_tick" canSend1
+
+  -- AIMD: deduct
+  congestionOnSend aimd 0 now
+  rate <- congestionRate aimd
+  assert t "cong_aimd_rate" (rate > 59.0)
+
+  -- AIMD: pacing returns 0 (AIMD uses budget, not pacing)
+  pacing0 <- congestionPacingNs aimd
+  assertEqual t "cong_aimd_no_pacing" (0 :: Int64) pacing0
+
+  -- CWND: create
+  cwnd <- newCongestionController CwndTcpLike 60.0 0.1 ms250 1200
+  -- cwnd = 10 * 1200 = 12000, in_flight = 0 → can send
+  canSendCwnd <- congestionCanSend cwnd 1200
+  assert t "cong_cwnd_can_send" canSendCwnd
+
+  -- CWND: send fills in_flight
+  congestionOnSend cwnd 1200 now
+  congestionOnSend cwnd 1200 now
+  congestionOnSend cwnd 1200 now
+
+  -- CWND: ack grows window
+  congestionOnAck cwnd 1200 1
+
+  -- CWND: pacing after setting SRTT
+  congestionTick cwnd 0.0 0.0 100000000 now -- sets srtt = 100ms
+  pacingCwnd <- congestionPacingNs cwnd
+  assert t "cong_cwnd_pacing" (pacingCwnd > 0)
+
+  -- CWND: loss halves window
+  congestionOnLoss cwnd 42 now
+
+  -- CWND: idle restart
+  let future = MonoTime 10000000000 -- 10 seconds later
+  congestionCheckIdle cwnd future 200000000 -- RTO = 200ms
+
+  -- CWND: rate returns 0 (CWND uses pacing)
+  rateCwnd <- congestionRate cwnd
+  assertEqual t "cong_cwnd_rate_zero" 0.0 rateCwnd
