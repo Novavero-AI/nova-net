@@ -22,16 +22,26 @@ module NovaNet
     module NovaNet.FFI.Batch,
     module NovaNet.FFI.Crypto,
     module NovaNet.FFI.Bandwidth,
+    module NovaNet.FFI.Rtt,
+    module NovaNet.FFI.SentBuf,
+    module NovaNet.FFI.LossWindow,
+    module NovaNet.FFI.AckProcess,
+    module NovaNet.FFI.Congestion,
   )
 where
 
 import NovaNet.Class
 import NovaNet.Config
+import NovaNet.FFI.AckProcess
 import NovaNet.FFI.Bandwidth
 import NovaNet.FFI.Batch
 import NovaNet.FFI.CRC32C
+import NovaNet.FFI.Congestion
 import NovaNet.FFI.Crypto
 import NovaNet.FFI.Fragment
+import NovaNet.FFI.LossWindow
 import NovaNet.FFI.Packet
+import NovaNet.FFI.Rtt
+import NovaNet.FFI.SentBuf
 import NovaNet.FFI.Seq
 import NovaNet.Types

@@ -56,6 +56,15 @@ nn_sent_buf_lookup(const nn_sent_buf *buf, uint16_t seq)
     return NULL;
 }
 
+nn_sent_record *
+nn_sent_buf_lookup_mut(nn_sent_buf *buf, uint16_t seq)
+{
+    int idx = seq & NN_SEQ_RING_MASK;
+    if (buf->entries[idx].occupied && buf->seq_nums[idx] == seq)
+        return &buf->entries[idx];
+    return NULL;
+}
+
 int
 nn_sent_buf_delete(nn_sent_buf *buf, uint16_t seq)
 {

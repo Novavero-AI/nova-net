@@ -116,6 +116,10 @@ int nn_sent_buf_insert(nn_sent_buf *buf, uint16_t seq,
 /** Lookup by sequence number. Returns NULL if not found. */
 const nn_sent_record *nn_sent_buf_lookup(const nn_sent_buf *buf, uint16_t seq);
 
+/** Mutable lookup by sequence number. Returns NULL if not found.
+ *  Used by nn_ack_process to increment nack_count. */
+nn_sent_record *nn_sent_buf_lookup_mut(nn_sent_buf *buf, uint16_t seq);
+
 /** Delete by sequence number. Returns 1 if deleted, 0 if not found. */
 int nn_sent_buf_delete(nn_sent_buf *buf, uint16_t seq);
 

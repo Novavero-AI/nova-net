@@ -36,6 +36,11 @@ library
     NovaNet.FFI.Batch
     NovaNet.FFI.Crypto
     NovaNet.FFI.Bandwidth
+    NovaNet.FFI.Rtt
+    NovaNet.FFI.SentBuf
+    NovaNet.FFI.LossWindow
+    NovaNet.FFI.AckProcess
+    NovaNet.FFI.Congestion
 
   c-sources:
     cbits/nn_packet.c
@@ -45,6 +50,9 @@ library
     cbits/nn_batch.c
     cbits/nn_crypto.c
     cbits/nn_bandwidth.c
+    cbits/nn_rtt.c
+    cbits/nn_ack_process.c
+    cbits/nn_congestion.c
     cbits/nn_ffi.c
 
   include-dirs:     cbits

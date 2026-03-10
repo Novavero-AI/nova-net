@@ -11,6 +11,10 @@
 #include "nn_fragment.h"
 #include "nn_crypto.h"
 #include "nn_bandwidth.h"
+#include "nn_rtt.h"
+#include "nn_ack_process.h"
+#include "nn_congestion.h"
+#include <string.h>
 
 /* ---------------------------------------------------------------------------
  * Packet header
@@ -142,3 +146,145 @@ void nn_ffi_bandwidth_record(void *bw, uint32_t size, uint64_t now_ns)
 
 double nn_ffi_bandwidth_bps(const void *bw, uint64_t now_ns)
 { return nn_bandwidth_bps((const nn_bandwidth *)bw, now_ns); }
+
+/* ---------------------------------------------------------------------------
+ * RTT estimation
+ * ------------------------------------------------------------------------- */
+
+size_t nn_ffi_rtt_size(void)
+{ return sizeof(nn_rtt); }
+
+void nn_ffi_rtt_init(void *rtt)
+{ nn_rtt_init((nn_rtt *)rtt); }
+
+void nn_ffi_rtt_update(void *rtt, int64_t sample_ns)
+{ nn_rtt_update((nn_rtt *)rtt, sample_ns); }
+
+int64_t nn_ffi_rtt_rto(const void *rtt)
+{ return nn_rtt_rto((const nn_rtt *)rtt); }
+
+int64_t nn_ffi_rtt_srtt(const void *rtt)
+{ return nn_rtt_srtt((const nn_rtt *)rtt); }
+
+/* ---------------------------------------------------------------------------
+ * Sent buffer
+ * ------------------------------------------------------------------------- */
+
+size_t nn_ffi_sent_buf_size(void)
+{ return sizeof(nn_sent_buf); }
+
+void nn_ffi_sent_buf_init(void *buf)
+{ nn_sent_buf_init((nn_sent_buf *)buf); }
+
+int nn_ffi_sent_buf_insert(void *buf, uint16_t seq,
+                            uint8_t channel_id, uint16_t channel_seq,
+                            uint64_t send_time_ns, uint32_t size)
+{
+    nn_sent_record rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.channel_id   = channel_id;
+    rec.channel_seq  = channel_seq;
+    rec.send_time_ns = send_time_ns;
+    rec.size         = size;
+    rec.nack_count   = 0;
+    rec.occupied     = 1;
+    return nn_sent_buf_insert((nn_sent_buf *)buf, seq, &rec);
+}
+
+int nn_ffi_sent_buf_count(const void *buf)
+{ return ((const nn_sent_buf *)buf)->count; }
+
+/* ---------------------------------------------------------------------------
+ * Loss window
+ * ------------------------------------------------------------------------- */
+
+size_t nn_ffi_loss_window_size(void)
+{ return sizeof(nn_loss_window); }
+
+void nn_ffi_loss_window_init(void *lw)
+{ nn_loss_window_init((nn_loss_window *)lw); }
+
+double nn_ffi_loss_window_percent(const void *lw)
+{ return nn_loss_window_percent((const nn_loss_window *)lw); }
+
+/* ---------------------------------------------------------------------------
+ * ACK processing
+ * ------------------------------------------------------------------------- */
+
+void nn_ffi_ack_process(void *sent_buf, void *loss_window,
+                        uint16_t ack_seq, uint32_t ack_bitfield,
+                        uint64_t now_ns,
+                        int32_t *out_acked_count, int32_t *out_acked_bytes,
+                        int64_t *out_rtt_sample_ns,
+                        int32_t *out_lost_count,
+                        int32_t *out_fast_retransmit,
+                        uint16_t *out_retransmit_seq)
+{
+    nn_ack_result result;
+    nn_ack_process((nn_sent_buf *)sent_buf, (nn_loss_window *)loss_window,
+                   ack_seq, ack_bitfield, now_ns, &result);
+    *out_acked_count     = result.acked_count;
+    *out_acked_bytes     = result.acked_bytes;
+    *out_rtt_sample_ns   = result.rtt_sample_ns;
+    *out_lost_count      = result.lost_count;
+    *out_fast_retransmit = result.fast_retransmit;
+    *out_retransmit_seq  = result.retransmit_seq;
+}
+
+/* ---------------------------------------------------------------------------
+ * Congestion: AIMD
+ * ------------------------------------------------------------------------- */
+
+size_t nn_ffi_cong_aimd_size(void)
+{ return sizeof(nn_cong_aimd); }
+
+void nn_ffi_cong_aimd_init(void *c, double base_rate,
+                            double loss_threshold, int64_t rtt_threshold_ns)
+{ nn_cong_aimd_init((nn_cong_aimd *)c, base_rate, loss_threshold, rtt_threshold_ns); }
+
+void nn_ffi_cong_aimd_tick(void *c, double dt_sec,
+                            double loss_frac, int64_t srtt_ns, int64_t now_ns)
+{ nn_cong_aimd_tick((nn_cong_aimd *)c, dt_sec, loss_frac, srtt_ns, now_ns); }
+
+int nn_ffi_cong_aimd_can_send(const void *c)
+{ return nn_cong_aimd_can_send((const nn_cong_aimd *)c); }
+
+void nn_ffi_cong_aimd_deduct(void *c)
+{ nn_cong_aimd_deduct((nn_cong_aimd *)c); }
+
+double nn_ffi_cong_aimd_rate(const void *c)
+{ return nn_cong_aimd_rate((const nn_cong_aimd *)c); }
+
+/* ---------------------------------------------------------------------------
+ * Congestion: CWND
+ * ------------------------------------------------------------------------- */
+
+size_t nn_ffi_cong_cwnd_size(void)
+{ return sizeof(nn_cong_cwnd); }
+
+void nn_ffi_cong_cwnd_init(void *c, uint32_t mss)
+{ nn_cong_cwnd_init((nn_cong_cwnd *)c, mss); }
+
+void nn_ffi_cong_cwnd_on_ack(void *c, int32_t acked_bytes)
+{ nn_cong_cwnd_on_ack((nn_cong_cwnd *)c, acked_bytes); }
+
+void nn_ffi_cong_cwnd_on_loss(void *c, uint16_t loss_seq, int64_t now_ns)
+{ nn_cong_cwnd_on_loss((nn_cong_cwnd *)c, loss_seq, now_ns); }
+
+int nn_ffi_cong_cwnd_can_send(const void *c, int32_t pkt_size)
+{ return nn_cong_cwnd_can_send((const nn_cong_cwnd *)c, pkt_size); }
+
+void nn_ffi_cong_cwnd_on_send(void *c, int32_t pkt_size, int64_t now_ns)
+{ nn_cong_cwnd_on_send((nn_cong_cwnd *)c, pkt_size, now_ns); }
+
+int64_t nn_ffi_cong_cwnd_pacing_ns(const void *c)
+{ return nn_cong_cwnd_pacing_ns((const nn_cong_cwnd *)c); }
+
+void nn_ffi_cong_cwnd_check_idle(void *c, int64_t now_ns, int64_t rto_ns)
+{ nn_cong_cwnd_check_idle((nn_cong_cwnd *)c, now_ns, rto_ns); }
+
+void nn_ffi_cong_cwnd_on_ack_seq(void *c, uint16_t acked_seq, int32_t acked_bytes)
+{ nn_cong_cwnd_on_ack_seq((nn_cong_cwnd *)c, acked_seq, acked_bytes); }
+
+void nn_ffi_cong_cwnd_set_srtt(void *c, int64_t srtt_ns)
+{ ((nn_cong_cwnd *)c)->srtt_ns = srtt_ns; }
