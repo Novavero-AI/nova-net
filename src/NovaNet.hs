@@ -31,9 +31,11 @@ module NovaNet
 
     -- * Protocol modules
     module NovaNet.Reliability,
+    module NovaNet.Channel,
   )
 where
 
+import NovaNet.Channel
 import NovaNet.Class
 import NovaNet.Config
 import NovaNet.FFI.AckProcess

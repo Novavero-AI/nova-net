@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Main (main) where
 
 import Control.Monad (unless)
@@ -7,6 +9,7 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Marshal.Array (pokeArray)
 import Foreign.Ptr (plusPtr)
+import NovaNet.Channel
 import NovaNet.Config
 import NovaNet.FFI.Bandwidth (bandwidthBps, bandwidthRecord, newBandwidthTracker)
 import NovaNet.FFI.CRC32C (crc32c)
@@ -82,6 +85,9 @@ main = do
   testRecvBuf t
   testAckUpdate t
   testReliability t
+
+  -- Channel
+  testChannel t
 
   TestState ran passed <- readIORef t
   putStrLn $ show passed ++ "/" ++ show ran ++ " tests passed"
@@ -494,3 +500,154 @@ testReliability t = do
   -- packetsInFlight decreases after ack
   flightPost <- packetsInFlight epAck3
   assertEqual t "rel_flight_after_ack" 0 flightPost
+
+-- ---------------------------------------------------------------------------
+-- Channel tests
+-- ---------------------------------------------------------------------------
+
+testChannel :: T -> IO ()
+testChannel t = do
+  let cid = case mkChannelId 0 of Just c -> c; Nothing -> error "impossible"
+      now = MonoTime 1000000
+
+  -- Construction
+  let chUnrel = newChannel cid defaultChannelConfig {ccDeliveryMode = Unreliable}
+  assert t "ch_unrel_not_reliable" (not (channelIsReliable chUnrel))
+
+  let chRel = newChannel cid defaultChannelConfig {ccDeliveryMode = ReliableOrdered}
+  assert t "ch_rel_reliable" (channelIsReliable chRel)
+
+  assertEqual t "ch_init_qlen" 0 (channelSendQueueLen chRel)
+  assertEqual t "ch_init_sent" (0 :: Word64) (chStatsSent chRel)
+
+  -- Unreliable send/receive
+  let chU = newChannel cid defaultChannelConfig {ccDeliveryMode = Unreliable}
+  case channelSend "hello" now chU of
+    Left err -> assert t ("ch_u_send: " ++ show err) False
+    Right (msg, chU2) -> do
+      assertEqual t "ch_u_seq" (0 :: Word16) (unSequenceNum (omChannelSeq msg))
+      assert t "ch_u_not_reliable" (not (omReliable msg))
+      assertEqual t "ch_u_sent" (1 :: Word64) (chStatsSent chU2)
+
+      -- Receive
+      let chU3 = onMessageReceived (SequenceNum 0) "hello" now chU2
+          (msgs, chU4) = channelReceive chU3
+      assertEqual t "ch_u_recv_count" 1 (length msgs)
+      case msgs of
+        (m : _) -> assertEqual t "ch_u_recv_data" "hello" m
+        [] -> assert t "ch_u_recv_data" False
+      assertEqual t "ch_u_recv_stat" (1 :: Word64) (chStatsReceived chU4)
+
+  -- UnreliableSequenced: in-order accepted, old dropped
+  let chUS = newChannel cid defaultChannelConfig {ccDeliveryMode = UnreliableSequenced}
+      chUS2 = onMessageReceived (SequenceNum 5) "a" now chUS
+      chUS3 = onMessageReceived (SequenceNum 3) "b" now chUS2 -- older, dropped
+      chUS4 = onMessageReceived (SequenceNum 8) "c" now chUS3 -- newer, accepted
+      (msgsUS, chUS5) = channelReceive chUS4
+  assertEqual t "ch_us_recv" 2 (length msgsUS)
+  assertEqual t "ch_us_dropped" (1 :: Word64) (chStatsDropped chUS5)
+
+  -- ReliableUnordered: dedup
+  let chRU = newChannel cid defaultChannelConfig {ccDeliveryMode = ReliableUnordered}
+      chRU2 = onMessageReceived (SequenceNum 1) "x" now chRU
+      chRU3 = onMessageReceived (SequenceNum 1) "x" now chRU2 -- dup
+      (msgsRU, chRU4) = channelReceive chRU3
+  assertEqual t "ch_ru_recv" 1 (length msgsRU)
+  assertEqual t "ch_ru_dropped" (1 :: Word64) (chStatsDropped chRU4)
+
+  -- ReliableOrdered: in-order immediate, OOO buffered, gap fill
+  let chRO = newChannel cid defaultChannelConfig {ccDeliveryMode = ReliableOrdered}
+      -- Receive seq 0 (expected): delivered immediately
+      chRO2 = onMessageReceived (SequenceNum 0) "first" now chRO
+      -- Receive seq 2 (skip 1): buffered
+      chRO3 = onMessageReceived (SequenceNum 2) "third" now chRO2
+      (msgsRO1, chRO4) = channelReceive chRO3
+  assertEqual t "ch_ro_immediate" 1 (length msgsRO1)
+  case msgsRO1 of
+    (m : _) -> assertEqual t "ch_ro_immediate_data" "first" m
+    [] -> assert t "ch_ro_immediate_data" False
+
+  -- Fill gap: receive seq 1 → delivers 1 and flushes buffered 2
+  let chRO5 = onMessageReceived (SequenceNum 1) "second" now chRO4
+      (msgsRO2, chRO6) = channelReceive chRO5
+  assertEqual t "ch_ro_flush" 2 (length msgsRO2)
+  assertEqual t "ch_ro_flush_order" ["second", "third"] msgsRO2
+  assertEqual t "ch_ro_recv_stat" (3 :: Word64) (chStatsReceived chRO6)
+
+  -- ReliableOrdered: duplicate behind expected dropped
+  let chRO7 = onMessageReceived (SequenceNum 0) "dup" now chRO6
+      (msgsRODup, _) = channelReceive chRO7
+  assertEqual t "ch_ro_dup" 0 (length msgsRODup)
+
+  -- ReliableSequenced: newer accepted, older dropped
+  let chRS = newChannel cid defaultChannelConfig {ccDeliveryMode = ReliableSequenced}
+      chRS2 = onMessageReceived (SequenceNum 10) "a" now chRS
+      chRS3 = onMessageReceived (SequenceNum 5) "b" now chRS2 -- dropped
+      chRS4 = onMessageReceived (SequenceNum 15) "c" now chRS3
+      (msgsRS, chRS5) = channelReceive chRS4
+  assertEqual t "ch_rs_recv" 2 (length msgsRS)
+  assertEqual t "ch_rs_dropped" (1 :: Word64) (chStatsDropped chRS5)
+
+  -- Reliable send buffer + acknowledge
+  let chRA = newChannel cid defaultChannelConfig {ccDeliveryMode = ReliableOrdered}
+  case channelSend "data" now chRA of
+    Left err -> assert t ("ch_ra_send: " ++ show err) False
+    Right (_, chRA2) -> do
+      assertEqual t "ch_ra_qlen" 1 (channelSendQueueLen chRA2)
+      let chRA3 = acknowledgeMessage (SequenceNum 0) chRA2
+      assertEqual t "ch_ra_acked" 0 (channelSendQueueLen chRA3)
+
+  -- MessageTooLarge
+  let chBig = newChannel cid defaultChannelConfig {ccMaxMessageSize = 10}
+      bigPayload = BS.replicate 20 0xAA
+  case channelSend bigPayload now chBig of
+    Left MessageTooLarge -> assert t "ch_too_large" True
+    _ -> assert t "ch_too_large" False
+
+  -- BufferFull with BlockOnFull
+  let cfgBlock = defaultChannelConfig {ccDeliveryMode = ReliableOrdered, ccMessageBufferSize = 2, ccFullBufferPolicy = BlockOnFull}
+      chBlock = newChannel cid cfgBlock
+  case channelSend "a" now chBlock of
+    Left err -> assert t ("ch_block1: " ++ show err) False
+    Right (_, chBlock2) ->
+      case channelSend "b" now chBlock2 of
+        Left err -> assert t ("ch_block2: " ++ show err) False
+        Right (_, chBlock3) ->
+          case channelSend "c" now chBlock3 of
+            Left BufferFull -> assert t "ch_block_full" True
+            _ -> assert t "ch_block_full" False
+
+  -- BufferFull with DropOnFull: evicts oldest
+  let cfgDrop = defaultChannelConfig {ccDeliveryMode = ReliableOrdered, ccMessageBufferSize = 2, ccFullBufferPolicy = DropOnFull}
+      chDrop = newChannel cid cfgDrop
+  case channelSend "a" now chDrop of
+    Left err -> assert t ("ch_drop1: " ++ show err) False
+    Right (_, chDrop2) ->
+      case channelSend "b" now chDrop2 of
+        Left err -> assert t ("ch_drop2: " ++ show err) False
+        Right (_, chDrop3) ->
+          case channelSend "c" now chDrop3 of
+            Left err -> assert t ("ch_drop3: " ++ show err) False
+            Right (_, chDrop4) ->
+              assertEqual t "ch_drop_qlen" 2 (channelSendQueueLen chDrop4)
+
+  -- getRetransmitMessages: non-reliable returns empty
+  let chNonRel = newChannel cid defaultChannelConfig {ccDeliveryMode = Unreliable}
+      (retrans0, _) = getRetransmitMessages now 50000000 chNonRel
+  assertEqual t "ch_retrans_nonrel" 0 (length retrans0)
+
+  -- getRetransmitMessages: reliable with expired RTO
+  let cfgRetrans = defaultChannelConfig {ccDeliveryMode = ReliableOrdered}
+      chRetrans = newChannel cid cfgRetrans
+  case channelSend "retry" (MonoTime 1000000) chRetrans of
+    Left err -> assert t ("ch_retrans_send: " ++ show err) False
+    Right (_, chRetrans2) -> do
+      -- RTO of 50ms (50000000 ns), query at t=100ms
+      let (retrans1, chRetrans3) = getRetransmitMessages (MonoTime 100000000) 50000000 chRetrans2
+      assertEqual t "ch_retrans_count" 1 (length retrans1)
+      assertEqual t "ch_retrans_stat" (1 :: Word64) (chStatsRetransmits chRetrans3)
+
+  -- resetChannel
+  let chReset = resetChannel chRO6
+  assertEqual t "ch_reset_sent" (0 :: Word64) (chStatsSent chReset)
+  assertEqual t "ch_reset_qlen" 0 (channelSendQueueLen chReset)

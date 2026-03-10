@@ -43,6 +43,7 @@ library
     NovaNet.FFI.Congestion
     NovaNet.FFI.RecvBuf
     NovaNet.Reliability
+    NovaNet.Channel
 
   c-sources:
     cbits/nn_packet.c
