@@ -17,13 +17,14 @@
 
 ## What is nova-net?
 
-A general-purpose reliable UDP networking library. C99 handles the hot path (serialization, send/recv, ack processing, crypto). Haskell handles the protocol logic (connection state machines, congestion control, replication).
+A general-purpose reliable UDP networking library. C99 handles the hot path (serialization, send/recv, ack processing, crypto). Haskell handles the protocol logic (connection state machines, congestion control, replication). Successor to [gbnet-hs](https://hackage.haskell.org/package/gbnet-hs).
 
-- **C99 hot path** — packet serialization, socket I/O, ACK bitfield processing, CRC32C, ChaCha20-Poly1305. No heap allocation on the hot path.
+- **C99 hot path** — packet serialization, CRC32C (hardware-accelerated), ChaCha20-Poly1305 AEAD, ring buffers, fragmentation, message batching. Zero heap allocation on the hot path.
 - **Haskell protocol brain** — connection state machines, handshake orchestration, congestion control, replication. Pure, testable, correct-by-construction.
-- **Unsafe FFI boundary** — Haskell calls C with zero marshalling overhead. Just a function pointer jump.
+- **Unsafe FFI boundary** — flat scalar arguments, no Storable marshalling. Just a function pointer jump.
 - **Any platform** — C99 core compiles everywhere. Link from Haskell, Swift, Kotlin, Python, Zig, anything.
 - **Effect abstraction** — `MonadNetwork` typeclass enables pure deterministic testing with no real sockets.
+- **Zero external crypto deps** — ChaCha20-Poly1305 implemented from scratch (RFC 8439). CRC32C with SSE4.2/ARMv8 hardware acceleration and software fallback.
 
 ---
 
@@ -35,16 +36,33 @@ A general-purpose reliable UDP networking library. C99 handles the hot path (ser
 ├─────────────────────────────────────────┤
 │  Haskell Protocol Brain                 │
 │  Connection, Peer, Handshake,           │
-│  Congestion, Replication                │
+│  Congestion, Channel, Replication       │
 ├─────────────────────────────────────────┤
-│  Unsafe FFI Boundary                    │
-│  foreign import ccall unsafe            │
+│  FFI Boundary (unsafe ccall)            │
+│  NovaNet.FFI.{Packet,CRC32C,Seq,...}    │
 ├─────────────────────────────────────────┤
-│  C99 Hot Path                           │
-│  nn_packet, nn_serialize, nn_socket,    │
-│  nn_reliability, nn_crypto, nn_channel  │
+│  C99 Hot Path (1,955 LOC)               │
+│  nn_packet  nn_crc32c  nn_seq           │
+│  nn_fragment  nn_batch  nn_crypto       │
+│  nn_bandwidth  nn_wire                  │
 └─────────────────────────────────────────┘
 ```
+
+---
+
+## C99 Modules
+
+| Module | Purpose |
+|--------|---------|
+| `nn_wire.h` | Little-endian helpers, byte swap, buffer bounds (header-only) |
+| `nn_packet` | 9-byte packet header (68-bit wire format, 8 packet types) |
+| `nn_crc32c` | CRC32C integrity — SSE4.2, ARMv8 CRC hardware accel, software fallback |
+| `nn_seq` | Sequence numbers (wraparound-safe), 256-entry ring buffers, ACK bitfield, loss window, SplitMix RNG |
+| `nn_fragment` | Fragment header (6 bytes LE), message splitting |
+| `nn_batch` | Message batching/unbatching (count + length-prefixed) |
+| `nn_crypto` | ChaCha20-Poly1305 AEAD (RFC 8439, from scratch, constant-time tag comparison) |
+| `nn_bandwidth` | Sliding window bandwidth tracker |
+| `nn_ffi` | Flat-argument FFI entry points for Haskell |
 
 ---
 
@@ -53,11 +71,23 @@ A general-purpose reliable UDP networking library. C99 handles the hot path (ser
 - 68-bit packet headers (4-bit type + 16-bit seq + 16-bit ack + 32-bit ack bitfield)
 - 5 delivery modes (Unreliable, UnreliableSequenced, ReliableUnordered, ReliableOrdered, ReliableSequenced)
 - Dual-layer congestion control (binary mode + TCP New Reno window)
-- ChaCha20-Poly1305 AEAD encryption with anti-replay
+- ChaCha20-Poly1305 AEAD encryption with anti-replay nonce tracking
+- Hardware-accelerated CRC32C (SSE4.2 on x86, ARMv8 CRC on aarch64)
 - Jacobson/Karels RTT estimation with adaptive retransmit
 - Large message fragmentation and reassembly
 - Connection migration
 - Delta compression, interest filtering, priority accumulation, snapshot interpolation
+- All multi-byte wire fields are little-endian
+
+---
+
+## Status
+
+**C99 hot path**: Complete (8 modules, 1,955 LOC, 335 tests passing).
+
+**Haskell FFI bindings**: Complete (9 modules, builds clean with `-Werror`).
+
+**Haskell protocol brain**: In progress (porting from gbnet-hs).
 
 ---
 
