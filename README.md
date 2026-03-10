@@ -41,7 +41,7 @@ A general-purpose reliable UDP networking library. C99 handles the hot path (ser
 │  FFI Boundary (unsafe ccall)            │
 │  NovaNet.FFI.{Packet,CRC32C,Seq,...}    │
 ├─────────────────────────────────────────┤
-│  C99 Hot Path (1,955 LOC)               │
+│  C99 Hot Path                           │
 │  nn_packet  nn_crc32c  nn_seq           │
 │  nn_fragment  nn_batch  nn_crypto       │
 │  nn_bandwidth  nn_wire                  │
@@ -83,7 +83,7 @@ A general-purpose reliable UDP networking library. C99 handles the hot path (ser
 
 ## Status
 
-**C99 hot path**: Complete (8 modules, 1,955 LOC, 335 tests passing).
+**C99 hot path**: Complete (8 modules, 6 test suites passing).
 
 **Haskell FFI bindings**: Complete (9 modules, builds clean with `-Werror`).
 

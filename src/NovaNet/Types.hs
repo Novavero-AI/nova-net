@@ -29,6 +29,8 @@ module NovaNet.Types
     addNs,
     diffNs,
     Milliseconds (..),
+    addMs,
+    scaleMs,
     msToNs,
     nsToMs,
 
@@ -110,7 +112,7 @@ nextSeq (SequenceNum s) = SequenceNum (s + 1)
 -- | Fragment message identifier.
 -- Use 'initialMessageId' and 'nextMessageId' to construct and advance.
 newtype MessageId = MessageId {unMessageId :: Word32}
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Show)
 
 -- | The initial message ID (0).
 initialMessageId :: MessageId
@@ -164,7 +166,17 @@ diffNs (MonoTime start) (MonoTime now) = now - start
 -- | Type-safe milliseconds to prevent unit mixing with seconds or
 -- nanoseconds. All timeout and interval config fields use this type.
 newtype Milliseconds = Milliseconds {unMilliseconds :: Double}
-  deriving (Eq, Ord, Show, Num)
+  deriving (Eq, Ord, Show)
+
+-- | Add two durations.
+addMs :: Milliseconds -> Milliseconds -> Milliseconds
+addMs (Milliseconds a) (Milliseconds b) = Milliseconds (a + b)
+{-# INLINE addMs #-}
+
+-- | Scale a duration by a factor.
+scaleMs :: Milliseconds -> Double -> Milliseconds
+scaleMs (Milliseconds ms) factor = Milliseconds (ms * factor)
+{-# INLINE scaleMs #-}
 
 -- | Convert milliseconds to nanoseconds (for 'MonoTime' arithmetic).
 msToNs :: Milliseconds -> Word64

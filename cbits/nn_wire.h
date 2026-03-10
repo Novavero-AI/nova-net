@@ -17,6 +17,9 @@
  * Byte order detection
  * ------------------------------------------------------------------------- */
 
+/* __BYTE_ORDER__ is defined by GCC and Clang.  MSVC does not define it,
+ * but all MSVC targets (x86, x86_64, ARM, ARM64) are little-endian,
+ * so the fallback to NN_BIG_ENDIAN=0 is correct. */
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
   #define NN_BIG_ENDIAN 1
 #else

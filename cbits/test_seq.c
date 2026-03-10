@@ -202,14 +202,13 @@ static void test_loss_window(void)
         nn_loss_window_record(&lw, 0);
     ASSERT("loss_all_good", nn_loss_window_percent(&lw) == 0.0);
 
-    /* 8 success + 2 lost = 20% loss */
+    /* 8 success + 2 lost = 20% loss (exact: 2/10 == 0.2) */
     nn_loss_window_init(&lw);
     for (int i = 0; i < 8; i++)
         nn_loss_window_record(&lw, 0);
     nn_loss_window_record(&lw, 1);
     nn_loss_window_record(&lw, 1);
-    double pct = nn_loss_window_percent(&lw);
-    ASSERT("loss_20pct", pct > 0.19 && pct < 0.21);
+    ASSERT("loss_20pct", nn_loss_window_percent(&lw) == 0.2);
 
     /* Fill entire window with losses */
     nn_loss_window_init(&lw);
@@ -330,11 +329,10 @@ static void test_loss_window_full_wrap(void)
         nn_loss_window_record(&lw, 1);
     ASSERT("wrap_all_bad", nn_loss_window_percent(&lw) == 1.0);
 
-    /* Overwrite half with successes */
+    /* Overwrite half with successes (exact: 128/256 == 0.5) */
     for (int i = 0; i < 128; i++)
         nn_loss_window_record(&lw, 0);
-    double pct = nn_loss_window_percent(&lw);
-    ASSERT("wrap_half", pct > 0.49 && pct < 0.51);
+    ASSERT("wrap_half", nn_loss_window_percent(&lw) == 0.5);
 }
 
 static void test_sent_buf_collision(void)
@@ -380,6 +378,49 @@ static void test_rng_double_extremes(void)
     ASSERT("rng_double_max_ge_0", dmax >= 0.0);
 }
 
+/* --- H-1: nn_sent_buf_insert return values --- */
+
+static void test_sent_buf_insert_return(void)
+{
+    nn_sent_buf buf;
+    nn_sent_buf_init(&buf);
+
+    nn_sent_record rec = {
+        .channel_id = 0, .channel_seq = 10,
+        .send_time_ns = 1000, .size = 64, .nack_count = 0, .occupied = 1
+    };
+    nn_sent_record rec2 = {
+        .channel_id = 1, .channel_seq = 20,
+        .send_time_ns = 2000, .size = 128, .nack_count = 0, .occupied = 1
+    };
+
+    /* Insert into empty slot → 0 */
+    ASSERT_EQ("insert_empty_rc", 0, nn_sent_buf_insert(&buf, 42, &rec));
+
+    /* Overwrite same seq → 0 (not an eviction) */
+    ASSERT_EQ("insert_same_rc", 0, nn_sent_buf_insert(&buf, 42, &rec2));
+
+    /* Evict different seq (42 + 256 maps to same slot) → 1 */
+    ASSERT_EQ("insert_evict_rc", 1, nn_sent_buf_insert(&buf, 42 + 256, &rec));
+}
+
+/* --- M-8: Duplicate seq in nn_ack_update — verify no-op --- */
+
+static void test_ack_duplicate(void)
+{
+    uint16_t remote = 0;
+    uint64_t bits = 0;
+
+    nn_ack_update(&remote, &bits, 5);
+    ASSERT_EQ("dup_remote_5", 5, remote);
+    uint64_t bits_before = bits;
+
+    /* Duplicate: diff == 0, neither branch fires → no-op */
+    nn_ack_update(&remote, &bits, 5);
+    ASSERT_EQ("dup_remote_still_5", 5, remote);
+    ASSERT_EQ("dup_bits_unchanged", (long long)bits_before, (long long)bits);
+}
+
 int main(void)
 {
     test_seq_gt();
@@ -399,6 +440,8 @@ int main(void)
     test_sent_buf_collision();
     test_rng_seed_zero();
     test_rng_double_extremes();
+    test_sent_buf_insert_return();
+    test_ack_duplicate();
 
     printf("%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

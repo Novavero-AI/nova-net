@@ -199,6 +199,31 @@ static void test_init_state(void)
     ASSERT("init_window", fabs(bw.window_ms - 500.0) < 0.001);
 }
 
+/* --- H-6: window_ms <= 0 falls back to default --- */
+
+static void test_zero_window(void)
+{
+    nn_bandwidth bw;
+    nn_bandwidth_init(&bw, 0.0);
+
+    /* Should fall back to default window */
+    ASSERT("zero_window_default", fabs(bw.window_ms - NN_BANDWIDTH_WINDOW_MS) < 0.001);
+
+    /* Should still function correctly */
+    nn_bandwidth_record(&bw, 1000, 100 * NS_PER_MS);
+    double bps = nn_bandwidth_bps(&bw, 200 * NS_PER_MS);
+    ASSERT("zero_window_bps", bps > 0.0);
+}
+
+static void test_negative_window(void)
+{
+    nn_bandwidth bw;
+    nn_bandwidth_init(&bw, -100.0);
+
+    /* Should fall back to default window */
+    ASSERT("neg_window_default", fabs(bw.window_ms - NN_BANDWIDTH_WINDOW_MS) < 0.001);
+}
+
 int main(void)
 {
     test_empty_tracker();
@@ -211,6 +236,8 @@ int main(void)
     test_all_expired();
     test_record_after_expiry();
     test_init_state();
+    test_zero_window();
+    test_negative_window();
 
     printf("%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

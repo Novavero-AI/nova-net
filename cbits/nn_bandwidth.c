@@ -3,6 +3,7 @@
  */
 
 #include "nn_bandwidth.h"
+#include <string.h>
 
 /** Nanoseconds per millisecond. */
 #define NS_PER_MS 1000000ull
@@ -10,9 +11,8 @@
 void
 nn_bandwidth_init(nn_bandwidth *bw, double window_ms)
 {
-    bw->head      = 0;
-    bw->count     = 0;
-    bw->window_ms = window_ms;
+    memset(bw, 0, sizeof(*bw));
+    bw->window_ms = (window_ms > 0.0) ? window_ms : NN_BANDWIDTH_WINDOW_MS;
 }
 
 void

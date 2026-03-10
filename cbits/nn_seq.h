@@ -25,7 +25,8 @@
 /** Ring buffer index mask. */
 #define NN_SEQ_RING_MASK (NN_SEQ_RING_SIZE - 1)
 
-/** Number of ACK bits in the bitfield. */
+/** Number of ACK bits in the internal bitfield (64-bit).
+ *  On the wire only 32 bits are sent; the upper 32 remain local. */
 #define NN_ACK_BITS_WINDOW 64
 
 /** NACKs needed for fast retransmit. */
@@ -135,7 +136,6 @@ typedef struct {
     uint16_t seq_nums[NN_SEQ_RING_SIZE];
     uint8_t  occupied[NN_SEQ_RING_SIZE];
     uint16_t highest;
-    int      size; /* always NN_SEQ_RING_SIZE, kept for API */
 } nn_seq_buf;
 
 /** Initialize sequence buffer (all slots empty). */

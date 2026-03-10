@@ -38,6 +38,10 @@ size_t nn_crc32c_append(uint8_t *buf, size_t data_len);
  *
  * Returns payload length (total_len - 4) on success, or 0 if the buffer
  * is too short or the checksum does not match.
+ *
+ * Note: 0 is also returned for a valid 4-byte buffer with a matching
+ * CRC (zero-length payload). Callers who need to distinguish "valid
+ * empty" from "error" should check total_len >= NN_CRC32C_SIZE first.
  */
 size_t nn_crc32c_validate(const uint8_t *buf, size_t total_len);
 

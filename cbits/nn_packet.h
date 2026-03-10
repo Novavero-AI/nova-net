@@ -57,7 +57,7 @@ typedef struct {
     uint8_t  packet_type;   /* 4 bits on wire (0-7) */
     uint16_t sequence_num;  /* 16 bits */
     uint16_t ack;           /* 16 bits — most recent received sequence */
-    uint32_t ack_bitfield;  /* 32 bits — preceding 32 acks */
+    uint32_t ack_bitfield;  /* 32 bits on wire (lower 32 of internal 64-bit field) */
 } nn_packet_header;
 
 /* ---------------------------------------------------------------------------

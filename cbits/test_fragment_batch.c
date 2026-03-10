@@ -8,6 +8,7 @@
 
 #include "nn_fragment.h"
 #include "nn_batch.h"
+#include "nn_wire.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -57,21 +58,26 @@ static void test_fragment_header_truncated(void)
 static void test_fragment_header_invalid(void)
 {
     uint8_t buf[NN_FRAGMENT_HEADER_SIZE];
-
-    /* fragment_count = 0 → invalid */
-    nn_fragment_header hdr_zero = { .message_id = 1, .fragment_index = 0, .fragment_count = 0 };
-    nn_fragment_write(&hdr_zero, buf);
     nn_fragment_header out;
+
+    /* fragment_count = 0 → nn_fragment_read rejects
+     * (write the bytes manually since nn_fragment_write now validates) */
+    memset(buf, 0, sizeof(buf));
+    nn_write_u32le(buf, 1);
+    buf[4] = 0;  /* fragment_index */
+    buf[5] = 0;  /* fragment_count = 0 */
     ASSERT_EQ("frag_hdr_count_zero", -1, nn_fragment_read(buf, NN_FRAGMENT_HEADER_SIZE, &out));
 
     /* fragment_index >= fragment_count → invalid */
-    nn_fragment_header hdr_oob = { .message_id = 2, .fragment_index = 5, .fragment_count = 5 };
-    nn_fragment_write(&hdr_oob, buf);
+    nn_write_u32le(buf, 2);
+    buf[4] = 5;  /* index */
+    buf[5] = 5;  /* count */
     ASSERT_EQ("frag_hdr_idx_eq_cnt", -1, nn_fragment_read(buf, NN_FRAGMENT_HEADER_SIZE, &out));
 
     /* fragment_index > fragment_count → invalid */
-    nn_fragment_header hdr_far = { .message_id = 3, .fragment_index = 10, .fragment_count = 3 };
-    nn_fragment_write(&hdr_far, buf);
+    nn_write_u32le(buf, 3);
+    buf[4] = 10; /* index */
+    buf[5] = 3;  /* count */
     ASSERT_EQ("frag_hdr_idx_gt_cnt", -1, nn_fragment_read(buf, NN_FRAGMENT_HEADER_SIZE, &out));
 
     /* Max valid: index=254, count=255 → valid */
@@ -96,6 +102,8 @@ static void test_fragment_count(void)
     ASSERT_EQ("frag_count_0", 0, nn_fragment_count(0, 100));
     /* Too many fragments */
     ASSERT_EQ("frag_count_too_many", -1, nn_fragment_count(256 * 100, 100));
+    /* CRIT-1: max_payload = 0 → error (division by zero guarded) */
+    ASSERT_EQ("frag_count_payload_0", -1, nn_fragment_count(100, 0));
 }
 
 /* --- Fragment build --- */
@@ -219,6 +227,79 @@ static void test_batch_single_message(void)
     ASSERT("batch_single_data", memcmp(out_msg, msg, 64) == 0);
 }
 
+/* --- M-2: nn_fragment_write validates headers --- */
+
+static void test_fragment_write_validation(void)
+{
+    uint8_t buf[NN_FRAGMENT_HEADER_SIZE];
+
+    /* Valid header */
+    nn_fragment_header hdr_ok = { .message_id = 1, .fragment_index = 0, .fragment_count = 1 };
+    ASSERT_EQ("frag_write_ok", NN_FRAGMENT_HEADER_SIZE, nn_fragment_write(&hdr_ok, buf));
+
+    /* count = 0 → error */
+    nn_fragment_header hdr_zero = { .message_id = 1, .fragment_index = 0, .fragment_count = 0 };
+    ASSERT_EQ("frag_write_count_zero", -1, nn_fragment_write(&hdr_zero, buf));
+
+    /* index >= count → error */
+    nn_fragment_header hdr_oob = { .message_id = 1, .fragment_index = 5, .fragment_count = 5 };
+    ASSERT_EQ("frag_write_idx_eq_cnt", -1, nn_fragment_write(&hdr_oob, buf));
+
+    /* index > count → error */
+    nn_fragment_header hdr_far = { .message_id = 1, .fragment_index = 10, .fragment_count = 3 };
+    ASSERT_EQ("frag_write_idx_gt_cnt", -1, nn_fragment_write(&hdr_far, buf));
+}
+
+/* --- M-9: fragment count boundary (255 OK, 256 fails) --- */
+
+static void test_fragment_count_boundary(void)
+{
+    /* 255 fragments (1 byte each): OK */
+    ASSERT_EQ("frag_255_ok", 255, nn_fragment_count(255, 1));
+    /* 256 fragments: exceeds NN_MAX_FRAGMENT_COUNT (255) */
+    ASSERT_EQ("frag_256_fail", -1, nn_fragment_count(256, 1));
+}
+
+/* --- M-10: f32le/f64le roundtrips --- */
+
+static void test_wire_float_roundtrip(void)
+{
+    uint8_t buf[8];
+
+    /* f32le roundtrip */
+    float f = 3.14f;
+    nn_write_f32le(buf, f);
+    ASSERT("f32le_roundtrip", nn_read_f32le(buf) == f);
+
+    /* f64le roundtrip */
+    double d = 2.718281828459045;
+    nn_write_f64le(buf, d);
+    ASSERT("f64le_roundtrip", nn_read_f64le(buf) == d);
+
+    /* Negative values */
+    nn_write_f32le(buf, -1.5f);
+    ASSERT("f32le_neg", nn_read_f32le(buf) == -1.5f);
+
+    nn_write_f64le(buf, -1.5);
+    ASSERT("f64le_neg", nn_read_f64le(buf) == -1.5);
+}
+
+/* --- M-10: nn_buf_has edge cases --- */
+
+static void test_buf_has_edge_cases(void)
+{
+    /* Exact fit */
+    ASSERT("buf_has_exact", nn_buf_has(10, 0, 10));
+    /* One too many */
+    ASSERT("buf_has_overshoot", !nn_buf_has(10, 0, 11));
+    /* Offset at end */
+    ASSERT("buf_has_end_1", !nn_buf_has(10, 10, 1));
+    ASSERT("buf_has_end_0", nn_buf_has(10, 10, 0));
+    /* Overflow: offset + need wraps around */
+    ASSERT("buf_has_overflow", !nn_buf_has(10, SIZE_MAX, 1));
+    ASSERT("buf_has_overflow2", !nn_buf_has(SIZE_MAX, 1, SIZE_MAX));
+}
+
 int main(void)
 {
     test_fragment_header_roundtrip();
@@ -230,6 +311,10 @@ int main(void)
     test_batch_overflow();
     test_batch_empty_buf();
     test_batch_single_message();
+    test_fragment_write_validation();
+    test_fragment_count_boundary();
+    test_wire_float_roundtrip();
+    test_buf_has_edge_cases();
 
     printf("%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

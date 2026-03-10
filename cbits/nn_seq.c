@@ -35,6 +35,7 @@ nn_sent_buf_insert(nn_sent_buf *buf, uint16_t seq,
 {
     int idx = seq & NN_SEQ_RING_MASK;
     int was_occupied = buf->entries[idx].occupied;
+    uint16_t old_seq = buf->seq_nums[idx];
 
     buf->entries[idx]  = *record;
     buf->entries[idx].occupied = 1;
@@ -43,7 +44,7 @@ nn_sent_buf_insert(nn_sent_buf *buf, uint16_t seq,
     if (!was_occupied)
         buf->count++;
 
-    return 0;
+    return (was_occupied && old_seq != seq) ? 1 : 0;
 }
 
 const nn_sent_record *
@@ -77,7 +78,6 @@ nn_seq_buf_init(nn_seq_buf *buf)
     memset(buf->seq_nums, 0, sizeof(buf->seq_nums));
     memset(buf->occupied, 0, sizeof(buf->occupied));
     buf->highest = 0;
-    buf->size = NN_SEQ_RING_SIZE;
 }
 
 /* ---------------------------------------------------------------------------

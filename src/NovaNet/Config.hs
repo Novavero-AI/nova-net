@@ -21,6 +21,7 @@ module NovaNet.Config
     -- * Protocol constants
     minMtu,
     maxMtu,
+    seqHalfRange,
   )
 where
 
@@ -162,6 +163,10 @@ minMtu = 576
 -- | Maximum MTU (UDP maximum payload size).
 maxMtu :: Int
 maxMtu = 65535
+
+-- | Half of the 16-bit sequence space — maximum safe comparison distance.
+seqHalfRange :: Word16
+seqHalfRange = 32768
 
 -- ---------------------------------------------------------------------------
 -- Network config defaults (internal)
@@ -396,6 +401,7 @@ validateConfig nc =
       positiveMs FieldDeltaBaselineTimeout (ncDeltaBaselineTimeoutMs nc),
       positive FieldMaxBaselineSnapshots (ncMaxBaselineSnapshots nc),
       [ConfigValueTooLow FieldMaxSequenceDistance | ncMaxSequenceDistance nc == 0],
+      [ConfigValueTooHigh FieldMaxSequenceDistance | ncMaxSequenceDistance nc > seqHalfRange],
       -- Cross-field validations
       [ ConfigKeepaliveExceedsTimeout
       | unMilliseconds (ncKeepaliveIntervalMs nc)

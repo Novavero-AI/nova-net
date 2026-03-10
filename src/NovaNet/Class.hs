@@ -75,9 +75,9 @@ class (MonadTime m) => MonadNetwork m where
   -- | Send a datagram to the given address. Non-blocking.
   netSend :: SockAddr -> ByteString -> m (Either NetError ())
 
-  -- | Poll for an incoming datagram. Returns 'Nothing' if no data
-  -- is available (non-blocking).
-  netRecv :: m (Maybe (ByteString, SockAddr))
+  -- | Poll for an incoming datagram. Returns 'Right Nothing' if no data
+  -- is available (non-blocking), 'Left' on error.
+  netRecv :: m (Either NetError (Maybe (ByteString, SockAddr)))
 
   -- | Close the underlying socket.
   netClose :: m ()

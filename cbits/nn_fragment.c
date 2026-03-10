@@ -9,6 +9,9 @@
 int
 nn_fragment_write(const nn_fragment_header *hdr, uint8_t *buf)
 {
+    if (hdr->fragment_count == 0 || hdr->fragment_index >= hdr->fragment_count)
+        return -1;
+
     nn_write_u32le(buf, hdr->message_id);
     buf[4] = hdr->fragment_index;
     buf[5] = hdr->fragment_count;
@@ -34,8 +37,10 @@ nn_fragment_read(const uint8_t *buf, size_t buf_len, nn_fragment_header *out)
 int
 nn_fragment_count(size_t msg_len, size_t max_payload)
 {
-    if (msg_len == 0 || max_payload == 0)
+    if (msg_len == 0)
         return 0;
+    if (max_payload == 0)
+        return -1;
 
     size_t count = (msg_len + max_payload - 1) / max_payload;
     if (count > NN_MAX_FRAGMENT_COUNT)
