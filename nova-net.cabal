@@ -16,7 +16,7 @@ maintainer:         devon.tomlin@novavero.ai
 homepage:           https://github.com/Novavero-AI/nova-net
 bug-reports:        https://github.com/Novavero-AI/nova-net/issues
 category:           Network, Game
-stability:          stable
+stability:          experimental
 build-type:         Simple
 tested-with:        GHC == 9.8.4
 extra-doc-files:

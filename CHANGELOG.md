@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.0.0.0
+## 0.2.0.0
 
-First stable release.
+Feature complete release.
 
 ### Protocol Core
 
