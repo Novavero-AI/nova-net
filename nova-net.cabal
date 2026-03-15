@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               nova-net
-version:            0.1.0.0
+version:            0.3.0.0
 synopsis:           General-purpose reliable UDP with C99 hot path and Haskell protocol logic
 description:
   A general-purpose reliable UDP networking library. C99 hot path

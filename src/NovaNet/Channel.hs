@@ -13,6 +13,7 @@ module NovaNet.Channel
 
     -- * Send operations
     channelSend,
+    channelNextSeq,
     OutgoingMessage (..),
     ChannelSendError (..),
 
@@ -48,7 +49,7 @@ import qualified Data.IntSet as IS
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
 import Data.Word (Word16, Word64, Word8)
-import NovaNet.Config (ChannelConfig (..))
+import NovaNet.Config (ChannelConfig (..), seqHalfRange)
 import NovaNet.FFI.Seq (seqGt)
 import NovaNet.Types
 
@@ -82,7 +83,8 @@ data OutgoingMessage = OutgoingMessage
   { omChannelId :: !ChannelId,
     omChannelSeq :: !SequenceNum,
     omPayload :: !ByteString,
-    omReliable :: !Bool
+    omReliable :: !Bool,
+    omIsFragment :: !Bool
   }
   deriving (Show)
 
@@ -179,12 +181,13 @@ channelSend payload now ch
               { omChannelId = chChannelId ch,
                 omChannelSeq = seq_,
                 omPayload = payload,
-                omReliable = channelIsReliable ch
+                omReliable = channelIsReliable ch,
+                omIsFragment = False
               }
           sendBuf
             | channelIsReliable ch =
                 let trimmed
-                      | bufferFull = IM.deleteMin (chSendBuffer ch)
+                      | bufferFull = evictOldestEntry (chSendBuffer ch)
                       | otherwise = chSendBuffer ch
                     entry = SendEntry payload now 0
                  in IM.insert (seqKey seq_) entry trimmed
@@ -199,6 +202,12 @@ channelSend payload now ch
   where
     bufferFull = IM.size (chSendBuffer ch) >= ccMessageBufferSize (chConfig ch)
     isBlock = ccFullBufferPolicy (chConfig ch) == BlockOnFull
+
+-- | Allocate the next channel sequence number without sending a message.
+-- Used to reserve a sequence for fragmented message inner headers.
+channelNextSeq :: Channel -> (SequenceNum, Channel)
+channelNextSeq ch =
+  (chSendSeq ch, ch {chSendSeq = nextSeq (chSendSeq ch)})
 
 -- ---------------------------------------------------------------------------
 -- Receive
@@ -334,7 +343,8 @@ getRetransmitMessages now rtoNs ch
                         { omChannelId = chChannelId ch,
                           omChannelSeq = SequenceNum (fromIntegral key),
                           omPayload = sePayload entry,
-                          omReliable = True
+                          omReliable = True,
+                          omIsFragment = False
                         }
                     updated =
                       entry
@@ -417,14 +427,28 @@ cleanupDedupSet ch
              in circularDist < fromIntegral (seqHalfRange :: Word16)
        in ch {chRecvSeen = IS.filter keepPred (chRecvSeen ch)}
   where
-    seqHalfRange :: Word16
-    seqHalfRange = 32768
     seqSpaceSize :: Int
     seqSpaceSize = 65536
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
+
+-- | Evict the entry with the oldest send time from the send buffer.
+-- Correct even after sequence number wraparound (unlike 'IM.deleteMin').
+evictOldestEntry :: IM.IntMap SendEntry -> IM.IntMap SendEntry
+evictOldestEntry m
+  | IM.null m = m
+  | otherwise =
+      let (seedKey, seedEntry) = IM.findMin m
+          (oldKey, _) =
+            IM.foldlWithKey'
+              ( \(bk, bt) k e ->
+                  if seSendTime e < bt then (k, seSendTime e) else (bk, bt)
+              )
+              (seedKey, seSendTime seedEntry)
+              m
+       in IM.delete oldKey m
 
 -- | Convert a SequenceNum to an IntMap key.
 seqKey :: SequenceNum -> Int

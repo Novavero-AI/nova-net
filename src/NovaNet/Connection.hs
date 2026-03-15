@@ -17,6 +17,8 @@ module NovaNet.Connection
 
     -- * Send / Receive
     sendMessage,
+    sendFragmentMsg,
+    allocateChannelSeq,
     receiveMessages,
     receiveIncomingPayload,
 
@@ -82,6 +84,7 @@ import NovaNet.Config
 import NovaNet.Congestion
 import NovaNet.FFI.Bandwidth (BandwidthTracker, bandwidthRecord, newBandwidthTracker)
 import NovaNet.Fragment (FragmentAssembler, assemblerUpdate, newFragmentAssembler, onFragmentReceived)
+import NovaNet.Peer.Protocol (encodeChannelSeq, encodePayloadHeader)
 import NovaNet.Reliability
 import NovaNet.Types
 
@@ -277,7 +280,27 @@ sendMessage ::
   MonoTime ->
   Connection ->
   Either ConnectionError Connection
-sendMessage cid payload now conn
+sendMessage = sendMessageInternal False
+
+-- | Send a fragment on the given channel.  Like 'sendMessage' but
+-- marks the outgoing message as a fragment so the wire encoder
+-- uses the fragment payload header (isFragment=True).
+sendFragmentMsg ::
+  ChannelId ->
+  ByteString ->
+  MonoTime ->
+  Connection ->
+  Either ConnectionError Connection
+sendFragmentMsg = sendMessageInternal True
+
+sendMessageInternal ::
+  Bool ->
+  ChannelId ->
+  ByteString ->
+  MonoTime ->
+  Connection ->
+  Either ConnectionError Connection
+sendMessageInternal isFrag cid payload now conn
   | connState conn /= Connected = Left ErrNotConnected
   | otherwise =
       let idx = channelIdToInt cid
@@ -287,14 +310,29 @@ sendMessage cid payload now conn
               case channelSend payload now ch of
                 Left err -> Left (ErrChannelSend err)
                 Right (msg, updated) ->
-                  let outQ = case IM.lookup idx (connOutgoing conn) of
-                        Just q -> q |> msg
-                        Nothing -> Seq.singleton msg
+                  let tagged = msg {omIsFragment = isFrag}
+                      outQ = case IM.lookup idx (connOutgoing conn) of
+                        Just q -> q |> tagged
+                        Nothing -> Seq.singleton tagged
                    in Right
                         conn
                           { connChannels = IM.insert idx updated (connChannels conn),
                             connOutgoing = IM.insert idx outQ (connOutgoing conn)
                           }
+
+-- | Allocate a channel sequence number without sending a message.
+-- Used by the fragment send path to reserve a seq for the inner header.
+allocateChannelSeq ::
+  ChannelId ->
+  Connection ->
+  Maybe (SequenceNum, Connection)
+allocateChannelSeq cid conn =
+  let idx = channelIdToInt cid
+   in case IM.lookup idx (connChannels conn) of
+        Nothing -> Nothing
+        Just ch ->
+          let (seq_, updated) = channelNextSeq ch
+           in Just (seq_, conn {connChannels = IM.insert idx updated (connChannels conn)})
 
 -- | Drain delivered messages from a channel.
 receiveMessages :: ChannelId -> Connection -> ([ByteString], Connection)
@@ -382,8 +420,8 @@ processIncomingHeader packetSeq ackSeq ackBitfield now conn = do
       -- 4. Acknowledge on channels (pure)
       let chans = foldl ackOnChannel (connChannels conn) ackedPairs
 
-      -- 5. Feed congestion
-      congestionOnAck (connCongestion conn) (aoAckedBytes outcome) packetSeq
+      -- 5. Feed congestion (ackSeq = the remote's ACK of our packets)
+      congestionOnAck (connCongestion conn) (aoAckedBytes outcome) ackSeq
       when (aoLostCount outcome > 0) $
         congestionOnLoss (connCongestion conn) (aoRetransmitSeq outcome) now
 
@@ -425,13 +463,21 @@ processChannelOutput now conn = go conn (connChannelPriority conn)
             then do
               let (packetSeq, rel) = allocateSeq (connReliability c)
                   (ackSeq, ackBits) = getAckInfo (connReliability c)
+                  wirePayload
+                    | omIsFragment msg =
+                        BS.singleton (encodePayloadHeader (omChannelId msg) True)
+                          <> omPayload msg
+                    | otherwise =
+                        BS.singleton (encodePayloadHeader (omChannelId msg) False)
+                          <> encodeChannelSeq (omChannelSeq msg)
+                          <> omPayload msg
                   pkt =
                     OutgoingPacket
                       { opPacketType = Payload,
                         opSeq = packetSeq,
                         opAckSeq = ackSeq,
                         opAckBits = ackBits,
-                        opPayload = omPayload msg
+                        opPayload = wirePayload
                       }
 
               -- Record in reliability if reliable

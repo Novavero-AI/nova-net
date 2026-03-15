@@ -78,7 +78,7 @@ newNetworkSimulator config now =
       nsDelayedPackets = Seq.empty,
       nsTokenBucketTokens = 0.0,
       nsLastTokenRefill = now,
-      nsRngState = unMonoTime now
+      nsRngState = max 1 (unMonoTime now)
     }
 
 -- ---------------------------------------------------------------------------

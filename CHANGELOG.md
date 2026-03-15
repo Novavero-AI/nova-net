@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.0.0
+
+Bug fix release from final audit.
+
+### Bug Fixes
+
+- Fixed payload header never prepended on send path — channel routing and fragment detection were broken on the wire
+- Fixed DropOnFull eviction after sequence wraparound — was evicting newest message instead of oldest
+- Fixed wrong sequence passed to CWND congestion controller — recovery phase exit used incoming packet seq instead of acked seq
+- Fixed exception safety in runNetT/withNetT — recv thread and socket now cleaned up on exceptions
+- Fixed simulator xorshift64 stuck at zero when seeded with MonoTime 0
+- Fixed sendFragmented returning ErrInvalidChannel instead of ErrChannelSend MessageTooLarge
+
+### API Changes (breaking)
+
+- runNetT/withNetT specialized from MonadIO m to IO (exception safety requires it)
+- Added omIsFragment field to OutgoingMessage
+- Added sendFragmentMsg, allocateChannelSeq to Connection exports
+- Added channelNextSeq to Channel exports
+
+### Housekeeping
+
+- Removed shadowed seqHalfRange in Channel (uses Config import)
+- Fixed cabal version to match Hackage
+
 ## 0.2.0.0
 
 Feature complete release.

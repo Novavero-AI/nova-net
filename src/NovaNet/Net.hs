@@ -25,7 +25,7 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.STM (TQueue, atomically, newTQueueIO, tryReadTQueue, writeTQueue)
-import Control.Exception (IOException, catch)
+import Control.Exception (IOException, catch, finally)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Trans.State.Strict (StateT (..), get)
@@ -109,27 +109,28 @@ newtype NetT m a = NetT {unNetT :: StateT NetState m a}
   deriving (Functor, Applicative, Monad, MonadIO)
 
 -- | Run a 'NetT' action with the given socket. Starts a background
--- receive thread that is killed on completion.
-runNetT :: (MonadIO m) => UdpSocket -> NetT m a -> m a
+-- receive thread that is killed on completion.  Exception-safe: the
+-- recv thread is always killed even if the action throws.
+runNetT :: UdpSocket -> NetT IO a -> IO a
 runNetT sock (NetT action) = do
-  q <- liftIO newTQueueIO
-  tid <- liftIO $ forkIO (recvLoop sock q)
+  q <- newTQueueIO
+  tid <- forkIO (recvLoop sock q)
   let ns = NetState sock q tid
-  (result, _) <- runStateT action ns
-  liftIO $ killThread tid
+  (result, _) <- runStateT action ns `finally` killThread tid
   pure result
 
 -- | Bracket-style: open socket, run action, close socket.
-withNetT :: (MonadIO m) => String -> String -> (SockAddr -> NetT m a) -> m a
+-- Exception-safe: the recv thread and socket are always cleaned up.
+withNetT :: String -> String -> (SockAddr -> NetT IO a) -> IO a
 withNetT host port action = do
-  sock <- liftIO $ openSocket host port
+  sock <- openSocket host port
   let localAddr = socketLocalAddr sock
-  q <- liftIO newTQueueIO
-  tid <- liftIO $ forkIO (recvLoop sock q)
+  q <- newTQueueIO
+  tid <- forkIO (recvLoop sock q)
   let ns = NetState sock q tid
-  (result, _) <- runStateT (unNetT (action localAddr)) ns
-  liftIO $ killThread tid
-  liftIO $ closeSocket sock
+  (result, _) <-
+    runStateT (unNetT (action localAddr)) ns
+      `finally` (killThread tid >> closeSocket sock)
   pure result
 
 -- | Background receive loop.

@@ -53,12 +53,14 @@ import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, plusPtr)
 import Network.Socket (SockAddr)
+import NovaNet.Channel (ChannelSendError (..))
 import NovaNet.Class
 import NovaNet.Config
 import NovaNet.Connection
   ( Connection,
     ConnectionError (..),
     OutgoingPacket (..),
+    allocateChannelSeq,
     connectionState,
     disconnect,
     drainSendQueue,
@@ -67,6 +69,7 @@ import NovaNet.Connection
     processIncomingHeader,
     receiveIncomingPayload,
     receiveMessages,
+    sendFragmentMsg,
     sendMessage,
     updateTick,
   )
@@ -214,13 +217,18 @@ sendFragmented peerId cid payload now conn cfg peer =
       overhead = packetHeaderSize + payloadHeaderSize + fragHeaderSizeConst
       maxFragPayload = max 1 (mtuSize - overhead)
       (mid, conn2) = Conn.allocateMessageId conn
-   in case splitMessage mid payload maxFragPayload of
-        Left _ -> Left ErrInvalidChannel
-        Right frags ->
-          case foldlEither (\c frag -> sendMessage cid frag now c) conn2 frags of
-            Left err -> Left err
-            Right final ->
-              Right peer {npConnections = Map.insert peerId final (npConnections peer)}
+   in case allocateChannelSeq cid conn2 of
+        Nothing -> Left ErrInvalidChannel
+        Just (msgSeq, conn3) ->
+          -- Inner payload: channelSeq + userData (for routing after reassembly)
+          let innerPayload = encodeChannelSeq msgSeq <> payload
+           in case splitMessage mid innerPayload maxFragPayload of
+                Left _ -> Left (ErrChannelSend MessageTooLarge)
+                Right frags ->
+                  case foldlEither (\c frag -> sendFragmentMsg cid frag now c) conn3 frags of
+                    Left err -> Left err
+                    Right final ->
+                      Right peer {npConnections = Map.insert peerId final (npConnections peer)}
 
 -- | Broadcast a message to all connected peers (optionally excluding one).
 peerBroadcast :: ChannelId -> ByteString -> Maybe PeerId -> MonoTime -> NetPeer -> NetPeer
@@ -468,7 +476,7 @@ processPayloadData srcPeer payload now conn =
         Nothing -> (conn, [])
         Just (cid, isFragment) ->
           if isFragment
-            then processFragmentData srcPeer rest now conn
+            then processFragmentData srcPeer cid rest now conn
             else processDirectMessage srcPeer cid rest now conn
 
 -- | Process a direct (non-fragmented) message.
@@ -484,19 +492,16 @@ processDirectMessage srcPeer cid rest now conn =
        in (conn3, events)
 
 -- | Process a fragmented message through reassembly.
-processFragmentData :: PeerId -> ByteString -> MonoTime -> Connection -> (Connection, [PeerEvent])
-processFragmentData srcPeer fragPayload now conn =
+-- The outer channel ID comes from the payload header; after reassembly
+-- the inner data is channelSeq (2 bytes LE) + user payload.
+processFragmentData :: PeerId -> ChannelId -> ByteString -> MonoTime -> Connection -> (Connection, [PeerEvent])
+processFragmentData srcPeer cid fragPayload now conn =
   let (mComplete, conn2) = Conn.processFragment fragPayload now conn
    in case mComplete of
         Nothing -> (conn2, [])
         Just assembled ->
-          case BS.uncons assembled of
-            Nothing -> (conn2, [])
-            Just (innerHdr, innerRest) ->
-              case decodePayloadHeader innerHdr of
-                Nothing -> (conn2, [])
-                Just (innerCid, _) ->
-                  processDirectMessage srcPeer innerCid innerRest now conn2
+          -- Assembled data: channelSeq:2 LE + userData
+          processDirectMessage srcPeer cid assembled now conn2
 
 -- ---------------------------------------------------------------------------
 -- Internal: update all connections
