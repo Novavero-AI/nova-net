@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: haskell-actions/hlint-setup@v3
+      - uses: haskell-actions/hlint-setup@v2
         with:
           version: '3.8'
-      - uses: haskell-actions/hlint-run@v3
+      - uses: haskell-actions/hlint-run@v2
         with:
           path: '["src/", "test/", "bench/"]'
           fail-on: warning
