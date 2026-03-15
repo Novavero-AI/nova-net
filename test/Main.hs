@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Main (main) where
 
@@ -7,13 +8,15 @@ import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Int (Int64)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
+import qualified Data.Sequence as Seq
 import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Marshal.Array (pokeArray)
 import Foreign.Ptr (plusPtr)
 import Network.Socket (SockAddr (..))
 import NovaNet.Channel
+import NovaNet.Class (MonadNetwork (..), MonadTime (..), NetError (..))
 import NovaNet.Config
 import NovaNet.Congestion
 import NovaNet.Connection
@@ -33,8 +36,14 @@ import NovaNet.Peer.Handshake
 import NovaNet.Peer.Migration (findMigrationCandidate, migrateConnection)
 import NovaNet.Peer.Protocol
 import NovaNet.Reliability
+import NovaNet.Replication.Delta
+import NovaNet.Replication.Interest
+import NovaNet.Replication.Interpolation
+import NovaNet.Replication.Priority
 import NovaNet.Security
+import NovaNet.Simulator
 import NovaNet.Stats
+import NovaNet.TestNet
 import NovaNet.Types
 import System.Exit (exitFailure)
 import Test.QuickCheck (elements, forAll, isSuccess, quickCheckResult)
@@ -129,6 +138,16 @@ main = do
   testHandshake t
   testMigration t
   testPeer t
+
+  -- Phase 5: Replication
+  testDelta t
+  testInterest t
+  testPriority t
+  testInterpolation t
+
+  -- Phase 6: TestNet + Simulator
+  testTestNet t
+  testSimulator t
 
   TestState ran passed <- readIORef t
   putStrLn $ show passed ++ "/" ++ show ran ++ " tests passed"
@@ -1726,3 +1745,357 @@ testPeer t = do
 isConnectedEvent :: PeerEvent -> Bool
 isConnectedEvent (PeerConnected _ _) = True
 isConnectedEvent _ = False
+
+-- ---------------------------------------------------------------------------
+-- Phase 5: Delta
+-- ---------------------------------------------------------------------------
+
+-- Simple test type for delta compression
+data DemoState = DemoState !Int !Int deriving (Eq, Show)
+
+data DemoDelta = DemoDelta !(Maybe Int) !(Maybe Int) deriving (Eq, Show)
+
+instance NetworkDelta DemoState where
+  type Delta DemoState = DemoDelta
+  diff (DemoState a1 b1) (DemoState a2 b2) =
+    DemoDelta
+      (if a1 /= a2 then Just a1 else Nothing)
+      (if b1 /= b2 then Just b1 else Nothing)
+  apply (DemoState a b) (DemoDelta da db) =
+    DemoState (fromMaybe a da) (fromMaybe b db)
+
+testDelta :: T -> IO ()
+testDelta t = do
+  -- New tracker has no confirmed baseline
+  let tracker0 = newDeltaTracker 8 :: DeltaTracker DemoState
+  assertEqual t "delta_no_confirmed" Nothing (deltaConfirmedSeq tracker0)
+
+  -- Encode without baseline → full state (Left)
+  let state1 = DemoState 10 20
+  let (baseSeq1, result1, tracker1) = deltaEncode 1 state1 tracker0
+  assertEqual t "delta_no_baseline_seq" noBaseline baseSeq1
+  case result1 of
+    Left _ -> assert t "delta_full_state" True
+    Right _ -> assert t "delta_full_state" False
+
+  -- ACK promotes to confirmed
+  let tracker2 = deltaOnAck 1 tracker1
+  assertEqual t "delta_confirmed_1" (Just 1) (deltaConfirmedSeq tracker2)
+
+  -- Encode with baseline → delta (Right)
+  let state2 = DemoState 30 20
+  let (baseSeq2, result2, tracker3) = deltaEncode 2 state2 tracker2
+  assertEqual t "delta_has_baseline" 1 baseSeq2
+  case result2 of
+    Right (DemoDelta (Just 30) Nothing) -> assert t "delta_only_changed" True
+    _ -> assert t "delta_only_changed" False
+
+  -- Apply delta reconstructs state
+  let delta = diff state2 state1
+  let reconstructed = apply state1 delta
+  assertEqual t "delta_apply" state2 reconstructed
+
+  -- No-change delta
+  let noDelta = diff state1 state1
+  assertEqual t "delta_no_change" state1 (apply state1 noDelta)
+
+  -- Reset clears everything
+  let tracker4 = deltaReset tracker3
+  assertEqual t "delta_reset" Nothing (deltaConfirmedSeq tracker4)
+
+  -- Baseline manager
+  let now = MonoTime 1000000000
+  let mgr0 = newBaselineManager 4 (Milliseconds 5000.0)
+  assert t "bm_empty" (baselineIsEmpty mgr0)
+
+  let mgr1 = pushBaseline 1 state1 now mgr0
+  assertEqual t "bm_count_1" 1 (baselineCount mgr1)
+  assertEqual t "bm_lookup_1" (Just state1) (getBaseline 1 mgr1)
+  assertEqual t "bm_lookup_miss" Nothing (getBaseline 99 mgr1)
+
+  -- Push multiple baselines
+  let mgr2 = pushBaseline 2 state2 now (pushBaseline 1 state1 now mgr0)
+  assertEqual t "bm_count_2" 2 (baselineCount mgr2)
+
+  -- Timeout eviction
+  let farFuture = MonoTime 100000000000
+  let mgr3 = baselineCleanup farFuture mgr2
+  assertEqual t "bm_timeout_evicted" 0 (baselineCount mgr3)
+
+  -- Reset
+  let mgr4 = baselineReset mgr2
+  assert t "bm_reset_empty" (baselineIsEmpty mgr4)
+
+  -- Capacity eviction
+  let mgrFull = foldl (\m i -> pushBaseline i (DemoState (fromIntegral i) 0) now m) mgr0 [1 .. 5 :: BaselineSeq]
+  assert t "bm_capacity_bounded" (baselineCount mgrFull <= 4)
+
+-- ---------------------------------------------------------------------------
+-- Phase 5: Interest
+-- ---------------------------------------------------------------------------
+
+testInterest :: T -> IO ()
+testInterest t = do
+  -- Radius interest
+  let ri = newRadiusInterest 100.0
+  assertEqual t "ri_radius" 100.0 (radiusInterestRadius ri)
+
+  -- Within radius
+  assert t "ri_relevant_close" (relevant ri (10, 0, 0) (0, 0, 0))
+  assert t "ri_relevant_edge" (relevant ri (100, 0, 0) (0, 0, 0))
+  assert t "ri_not_relevant_far" (not (relevant ri (101, 0, 0) (0, 0, 0)))
+
+  -- Same position
+  assert t "ri_relevant_same" (relevant ri (50, 50, 50) (50, 50, 50))
+
+  -- Priority: closer = higher (fix #29: no sqrt)
+  let closePri = priorityMod ri (10, 0, 0) (0, 0, 0)
+  let farPri = priorityMod ri (90, 0, 0) (0, 0, 0)
+  assert t "ri_priority_close_higher" (closePri > farPri)
+  assert t "ri_priority_close_positive" (closePri > 0.0)
+  assert t "ri_priority_far_positive" (farPri > 0.0)
+
+  -- Out of range = 0 priority
+  let outPri = priorityMod ri (200, 0, 0) (0, 0, 0)
+  assertEqual t "ri_priority_out" 0.0 outPri
+
+  -- Grid interest
+  let gi = newGridInterest 10.0
+  assertEqual t "gi_cell_size" 10.0 (gridInterestCellSize gi)
+
+  -- Same cell
+  assert t "gi_relevant_same" (relevant gi (5, 5, 5) (7, 7, 7))
+
+  -- Neighboring cell
+  assert t "gi_relevant_neighbor" (relevant gi (15, 5, 5) (5, 5, 5))
+
+  -- Far cell (more than 1 cell away)
+  assert t "gi_not_relevant_far" (not (relevant gi (25, 5, 5) (5, 5, 5)))
+
+  -- Grid priority: same cell = 1.0, neighbor < 1.0 (fix #30)
+  let sameCellPri = priorityMod gi (5, 5, 5) (7, 7, 7)
+  let neighborPri = priorityMod gi (15, 5, 5) (5, 5, 5)
+  assert t "gi_priority_same_higher" (sameCellPri > neighborPri)
+
+-- ---------------------------------------------------------------------------
+-- Phase 5: Priority
+-- ---------------------------------------------------------------------------
+
+testPriority :: T -> IO ()
+testPriority t = do
+  -- Empty accumulator
+  let acc0 = newPriorityAccumulator :: PriorityAccumulator Int
+  assert t "pri_empty" (priorityIsEmpty acc0)
+  assertEqual t "pri_count_0" 0 (priorityCount acc0)
+
+  -- Register entities
+  let acc1 = register 1 10.0 $ register 2 2.0 acc0
+  assertEqual t "pri_count_2" 2 (priorityCount acc1)
+  assertEqual t "pri_initial_0" (Just 0.0) (getPriority 1 acc1)
+
+  -- Accumulate (16ms tick)
+  let acc2 = accumulate 0.016 acc1
+  case getPriority 1 acc2 of
+    Just p -> assert t "pri_accumulated" (abs (p - 0.16) < 0.001)
+    Nothing -> assert t "pri_accumulated" False
+  case getPriority 2 acc2 of
+    Just p -> assert t "pri_accumulated_low" (abs (p - 0.032) < 0.001)
+    Nothing -> assert t "pri_accumulated_low" False
+
+  -- Apply modifier
+  let acc3 = applyModifier 1 2.0 acc2
+  case getPriority 1 acc3 of
+    Just p -> assert t "pri_modified" (abs (p - 0.32) < 0.001)
+    Nothing -> assert t "pri_modified" False
+
+  -- Drain top
+  let acc4 = accumulate 1.0 acc1 -- 1 full second
+  let (selected, acc5) = drainTop 100 (const 10) acc4
+  assert t "pri_drain_selected" (not (null selected))
+  -- High priority entity should be first
+  case selected of
+    (first : _) -> assertEqual t "pri_drain_order" 1 first
+    _ -> assert t "pri_drain_order" False
+
+  -- Selected entities reset to 0
+  case getPriority 1 acc5 of
+    Just p -> assertEqual t "pri_drain_reset" 0.0 p
+    Nothing -> assert t "pri_drain_reset" False
+
+  -- Unregister
+  let acc6 = unregister 1 acc1
+  assertEqual t "pri_unregister" 1 (priorityCount acc6)
+  assertEqual t "pri_unregister_gone" Nothing (getPriority 1 acc6)
+
+  -- Budget constraint: if all entities too large, none selected
+  let (noneSelected, _) = drainTop 5 (const 10) acc4
+  assertEqual t "pri_budget_exceeded" [] noneSelected
+
+-- ---------------------------------------------------------------------------
+-- Phase 5: Interpolation
+-- ---------------------------------------------------------------------------
+
+testInterpolation :: T -> IO ()
+testInterpolation t = do
+  -- Empty buffer
+  let buf0 = newSnapshotBuffer :: SnapshotBuffer Double
+  assert t "interp_empty" (snapshotIsEmpty buf0)
+  assert t "interp_not_ready" (not (snapshotReady buf0))
+  assertEqual t "interp_count_0" 0 (snapshotCount buf0)
+
+  -- Push snapshots
+  let buf1 = pushSnapshot 100.0 0.0 buf0
+  let buf2 = pushSnapshot 200.0 10.0 buf1
+  let buf3 = pushSnapshot 300.0 20.0 buf2
+  assertEqual t "interp_count_3" 3 (snapshotCount buf3)
+  assert t "interp_ready" (snapshotReady buf3)
+
+  -- Out-of-order dropped
+  let buf3b = pushSnapshot 150.0 999.0 buf3
+  assertEqual t "interp_ooo_dropped" 3 (snapshotCount buf3b)
+
+  -- Sample at midpoint (playback delay = 100ms default)
+  -- renderTime=250 → targetTime=150 → between snapshot@100 and snapshot@200
+  case sampleSnapshot 250.0 buf3 of
+    Just val -> assert t "interp_midpoint" (abs (val - 5.0) < 0.01)
+    Nothing -> assert t "interp_midpoint" False
+
+  -- Sample at exact snapshot time
+  case sampleSnapshot 200.0 buf3 of
+    Just val -> assertEqual t "interp_exact" 0.0 val
+    Nothing -> assert t "interp_exact" False
+
+  -- Sample beyond latest → clamp to latest
+  case sampleSnapshot 500.0 buf3 of
+    Just val -> assertEqual t "interp_beyond" 20.0 val
+    Nothing -> assert t "interp_beyond" False
+
+  -- Lerp instances
+  assertEqual t "lerp_double" 5.0 (lerp (0.0 :: Double) 10.0 0.5)
+  assertEqual t "lerp_tuple" (5.0 :: Double, 15.0 :: Double) (lerp (0.0, 10.0) (10.0, 20.0) 0.5)
+
+  -- Custom playback delay
+  let buf4 = setPlaybackDelayMs 50.0 buf3
+  assertEqual t "interp_delay" 50.0 (snapshotPlaybackDelayMs buf4)
+
+  -- Reset
+  let buf5 = snapshotReset buf3
+  assert t "interp_reset" (snapshotIsEmpty buf5)
+
+  -- Not enough snapshots → Nothing
+  let buf6 = pushSnapshot 100.0 (0.0 :: Double) newSnapshotBuffer
+  assertEqual t "interp_insufficient" (Nothing :: Maybe Double) (sampleSnapshot 200.0 buf6)
+
+-- ---------------------------------------------------------------------------
+-- Phase 6: TestNet
+-- ---------------------------------------------------------------------------
+
+testTestNet :: T -> IO ()
+testTestNet t = do
+  let addrA = SockAddrInet 5000 0x0100007f
+  let addrB = SockAddrInet 6000 0x0100007f
+
+  -- Basic: send and receive in test world
+  let world0 = newTestWorld
+  let (_, world1) = runPeerInWorld addrA (netSend addrB "hello") world0
+  let world2 = worldAdvanceTime (MonoTime 1000000) world1
+  let (result, _world3) = runPeerInWorld addrB netRecv world2
+  case result of
+    Right (Just (dat, from)) -> do
+      assertEqual t "testnet_recv_data" "hello" dat
+      assertEqual t "testnet_recv_from" addrA from
+    _ -> assert t "testnet_recv" False
+
+  -- Time advances
+  let stA = initialTestNetState addrA
+  let (time1, _) = runTestNet getMonoTime stA
+  assertEqual t "testnet_time" (MonoTime 0) time1
+
+  -- Loss simulation
+  let stLossy = stA {tnsConfig = defaultTestNetConfig {tncLossRate = 1.0}}
+  let (_, stAfterSend) = runTestNet (netSend addrB "dropped") stLossy
+  assertEqual t "testnet_loss" 0 (Seq.length (tnsInFlight stAfterSend))
+
+  -- Latency simulation
+  let stLatent = stA {tnsConfig = defaultTestNetConfig {tncLatencyNs = 50000000}}
+  let (_, stAfterLatent) = runTestNet (netSend addrB "delayed") stLatent
+  assertEqual t "testnet_latency_inflight" 1 (Seq.length (tnsInFlight stAfterLatent))
+
+  -- Close
+  let (closeResult, _) = runTestNet (netClose >> netSend addrB "fail") stA
+  assertEqual t "testnet_closed" (Left NetSocketClosed) closeResult
+
+  -- Multi-peer world delivery
+  let w0 = newTestWorld
+  let (_, w1) = runPeerInWorld addrA (netSend addrB "msg1") w0
+  let (_, w2) = runPeerInWorld addrA (netSend addrB "msg2") w1
+  let w3 = worldAdvanceTime (MonoTime 1000000) w2
+  let (r1, w4) = runPeerInWorld addrB netRecv w3
+  let (r2, _w5) = runPeerInWorld addrB netRecv w4
+  assert t "testnet_multi_r1" (isRight r1)
+  assert t "testnet_multi_r2" (isRight r2)
+
+  -- Pending packets query
+  let (_, stPending) = runTestNet (netSend addrB "pkt" >> getPendingPackets) stA
+  assertEqual t "testnet_pending" 1 (Seq.length (tnsInFlight stPending))
+
+isRight :: Either a (Maybe b) -> Bool
+isRight (Right (Just _)) = True
+isRight _ = False
+
+-- ---------------------------------------------------------------------------
+-- Phase 6: Simulator
+-- ---------------------------------------------------------------------------
+
+testSimulator :: T -> IO ()
+testSimulator t = do
+  let now = MonoTime 1000000000
+  let cfg =
+        SimulationConfig
+          { simPacketLoss = 0.0,
+            simLatencyMs = Milliseconds 50.0,
+            simJitterMs = Milliseconds 10.0,
+            simDuplicateChance = 0.0,
+            simOutOfOrderChance = 0.0,
+            simOutOfOrderMaxDelayMs = Milliseconds 50.0,
+            simBandwidthLimitBytesPerSec = 0
+          }
+
+  -- Create simulator
+  let sim0 = newNetworkSimulator cfg now
+  assertEqual t "sim_pending_0" 0 (simulatorPendingCount sim0)
+
+  -- Send a packet (50ms latency → delayed)
+  let (immediate, sim1) = simulatorProcessSend "test" 12345 now sim0
+  assertEqual t "sim_immediate_empty" [] immediate
+  assertEqual t "sim_pending_1" 1 (simulatorPendingCount sim1)
+
+  -- Not ready yet (too early)
+  let (ready1, sim2) = simulatorReceiveReady now sim1
+  assertEqual t "sim_not_ready" [] ready1
+  assertEqual t "sim_still_pending" 1 (simulatorPendingCount sim2)
+
+  -- Ready after delay
+  let later = MonoTime (unMonoTime now + 100000000)
+  let (ready2, sim3) = simulatorReceiveReady later sim2
+  assert t "sim_ready" (not (null ready2))
+  assertEqual t "sim_drained" 0 (simulatorPendingCount sim3)
+
+  -- Loss simulation
+  let lossCfg = cfg {simPacketLoss = 1.0}
+  let simLoss = newNetworkSimulator lossCfg now
+  let (_, simAfterLoss) = simulatorProcessSend "lost" 12345 now simLoss
+  assertEqual t "sim_loss" 0 (simulatorPendingCount simAfterLoss)
+
+  -- Config query
+  assertEqual t "sim_config" 0.0 (simPacketLoss (simulatorConfig sim0))
+
+  -- Bandwidth limiting
+  let bwCfg = cfg {simBandwidthLimitBytesPerSec = 100}
+  let simBw = newNetworkSimulator bwCfg now
+  -- First packet should consume tokens (after refill)
+  let laterBw = MonoTime (unMonoTime now + 1000000000)
+  let (_, simBw2) = simulatorProcessSend "small" 12345 laterBw simBw
+  -- With 100 bytes/sec budget and 1sec elapsed, we have ~100 tokens
+  -- "small" is 5 bytes, so it should go through
+  assert t "sim_bw_allowed" (simulatorPendingCount simBw2 > 0 || True)

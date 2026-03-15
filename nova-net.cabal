@@ -57,6 +57,12 @@ library
     NovaNet.Peer.Handshake
     NovaNet.Peer.Migration
     NovaNet.Net
+    NovaNet.Replication.Delta
+    NovaNet.Replication.Interest
+    NovaNet.Replication.Priority
+    NovaNet.Replication.Interpolation
+    NovaNet.TestNet
+    NovaNet.Simulator
 
   c-sources:
     cbits/nn_packet.c

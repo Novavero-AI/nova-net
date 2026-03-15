@@ -49,6 +49,16 @@ module NovaNet
     module NovaNet.Peer.Handshake,
     module NovaNet.Peer.Migration,
     module NovaNet.Net,
+
+    -- * Replication
+    module NovaNet.Replication.Delta,
+    module NovaNet.Replication.Interest,
+    module NovaNet.Replication.Priority,
+    module NovaNet.Replication.Interpolation,
+
+    -- * Testing
+    module NovaNet.TestNet,
+    module NovaNet.Simulator,
   )
 where
 
@@ -80,6 +90,12 @@ import NovaNet.Peer.Handshake
 import NovaNet.Peer.Migration
 import NovaNet.Peer.Protocol
 import NovaNet.Reliability
+import NovaNet.Replication.Delta
+import NovaNet.Replication.Interest
+import NovaNet.Replication.Interpolation
+import NovaNet.Replication.Priority
 import NovaNet.Security
+import NovaNet.Simulator
 import NovaNet.Stats
+import NovaNet.TestNet
 import NovaNet.Types
