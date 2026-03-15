@@ -22,11 +22,14 @@ module NovaNet.Config
     minMtu,
     maxMtu,
     seqHalfRange,
+    cookieSecretSize,
+    migrationCooldownNs,
+    maxUdpPacketSize,
   )
 where
 
 import Data.Bits ((.&.))
-import Data.Word (Word16, Word32, Word8)
+import Data.Word (Word16, Word32, Word64, Word8)
 import NovaNet.Types
 
 -- ---------------------------------------------------------------------------
@@ -167,6 +170,18 @@ maxMtu = 65535
 -- | Half of the 16-bit sequence space — maximum safe comparison distance.
 seqHalfRange :: Word16
 seqHalfRange = 32768
+
+-- | Size of the SipHash cookie secret in bytes.
+cookieSecretSize :: Int
+cookieSecretSize = 16
+
+-- | Migration cooldown in nanoseconds (5 seconds).
+migrationCooldownNs :: Word64
+migrationCooldownNs = 5000000000
+
+-- | Maximum UDP datagram size.
+maxUdpPacketSize :: Int
+maxUdpPacketSize = 65536
 
 -- ---------------------------------------------------------------------------
 -- Network config defaults (internal)

@@ -245,4 +245,18 @@ void nn_ffi_cong_cwnd_on_ack_seq(void *c, uint16_t acked_seq, int32_t acked_byte
 /** Update cached SRTT for pacing. */
 void nn_ffi_cong_cwnd_set_srtt(void *c, int64_t srtt_ns);
 
+/* ---------------------------------------------------------------------------
+ * SipHash
+ * ------------------------------------------------------------------------- */
+
+/** SipHash-2-4. key must be 16 bytes. */
+uint64_t nn_ffi_siphash(const uint8_t *key, const uint8_t *msg, size_t msg_len);
+
+/* ---------------------------------------------------------------------------
+ * CSPRNG
+ * ------------------------------------------------------------------------- */
+
+/** Fill buf with len cryptographically secure random bytes. */
+void nn_ffi_random_bytes(uint8_t *buf, size_t len);
+
 #endif /* NN_FFI_H */

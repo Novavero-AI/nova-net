@@ -42,6 +42,8 @@ library
     NovaNet.FFI.AckProcess
     NovaNet.FFI.Congestion
     NovaNet.FFI.RecvBuf
+    NovaNet.FFI.SipHash
+    NovaNet.FFI.Random
     NovaNet.Reliability
     NovaNet.Channel
     NovaNet.Congestion
@@ -50,6 +52,11 @@ library
     NovaNet.Mtu
     NovaNet.Security
     NovaNet.Stats
+    NovaNet.Peer
+    NovaNet.Peer.Protocol
+    NovaNet.Peer.Handshake
+    NovaNet.Peer.Migration
+    NovaNet.Net
 
   c-sources:
     cbits/nn_packet.c
@@ -62,6 +69,8 @@ library
     cbits/nn_rtt.c
     cbits/nn_ack_process.c
     cbits/nn_congestion.c
+    cbits/nn_siphash.c
+    cbits/nn_random.c
     cbits/nn_ffi.c
 
   include-dirs:     cbits

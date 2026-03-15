@@ -50,6 +50,16 @@ module NovaNet.Connection
     -- * ACK resolution (pure, exported for testing)
     resolveChannelAcks,
 
+    -- * Nonce / salt
+    connSendNonce,
+    connRecvNonceMax,
+    connClientSalt,
+    advanceNonce,
+    updateRecvNonce,
+
+    -- * Disconnect tracking
+    connDisconnectReason,
+
     -- * Errors
     ConnectionError (..),
   )
@@ -65,7 +75,7 @@ import qualified Data.Map.Strict as Map
 import Data.Ord (Down (..))
 import Data.Sequence (Seq, (|>))
 import qualified Data.Sequence as Seq
-import Data.Word (Word16, Word32)
+import Data.Word (Word16, Word32, Word64)
 import NovaNet.Channel
 import NovaNet.Config
 import NovaNet.Congestion
@@ -141,6 +151,10 @@ data Connection = Connection
     connFragmentAssembler :: !FragmentAssembler,
     -- Message ID for outgoing fragments
     connNextMessageId :: !MessageId,
+    -- Nonce / salt
+    connSendNonce :: !NonceCounter,
+    connRecvNonceMax :: !(Maybe Word64),
+    connClientSalt :: !Word64,
     -- Flags
     connPendingAck :: !Bool,
     connDataSentThisTick :: !Bool
@@ -186,6 +200,9 @@ newConnection cfg now = do
         connDisconnectRetries = 0,
         connFragmentAssembler = fragAsm,
         connNextMessageId = initialMessageId,
+        connSendNonce = initialNonce,
+        connRecvNonceMax = Nothing,
+        connClientSalt = 0,
         connPendingAck = False,
         connDataSentThisTick = False
       }
@@ -644,3 +661,22 @@ allocateMessageId :: Connection -> (MessageId, Connection)
 allocateMessageId conn =
   let mid = connNextMessageId conn
    in (mid, conn {connNextMessageId = nextMessageId mid})
+
+-- ---------------------------------------------------------------------------
+-- Nonce / salt
+-- ---------------------------------------------------------------------------
+
+-- | Advance the send nonce counter.
+advanceNonce :: Connection -> Connection
+advanceNonce conn = conn {connSendNonce = nextNonce (connSendNonce conn)}
+{-# INLINE advanceNonce #-}
+
+-- | Update the receive nonce high-water mark for anti-replay.
+updateRecvNonce :: Word64 -> Connection -> Connection
+updateRecvNonce counter conn =
+  case connRecvNonceMax conn of
+    Nothing -> conn {connRecvNonceMax = Just counter}
+    Just current
+      | counter > current -> conn {connRecvNonceMax = Just counter}
+      | otherwise -> conn
+{-# INLINE updateRecvNonce #-}

@@ -44,6 +44,9 @@ module NovaNet.Reliability
 
     -- * Connection migration
     resetMetrics,
+
+    -- * Internal (for Migration)
+    reLocalSeq,
   )
 where
 

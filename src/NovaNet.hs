@@ -28,6 +28,8 @@ module NovaNet
     module NovaNet.FFI.AckProcess,
     module NovaNet.FFI.Congestion,
     module NovaNet.FFI.RecvBuf,
+    module NovaNet.FFI.SipHash,
+    module NovaNet.FFI.Random,
 
     -- * Protocol modules
     module NovaNet.Reliability,
@@ -40,6 +42,13 @@ module NovaNet
     module NovaNet.Mtu,
     module NovaNet.Security,
     module NovaNet.Stats,
+
+    -- * Peer layer
+    module NovaNet.Peer,
+    module NovaNet.Peer.Protocol,
+    module NovaNet.Peer.Handshake,
+    module NovaNet.Peer.Migration,
+    module NovaNet.Net,
   )
 where
 
@@ -57,12 +66,19 @@ import NovaNet.FFI.Crypto
 import NovaNet.FFI.Fragment
 import NovaNet.FFI.LossWindow
 import NovaNet.FFI.Packet
+import NovaNet.FFI.Random
 import NovaNet.FFI.RecvBuf
 import NovaNet.FFI.Rtt
 import NovaNet.FFI.SentBuf
 import NovaNet.FFI.Seq
+import NovaNet.FFI.SipHash
 import NovaNet.Fragment
 import NovaNet.Mtu
+import NovaNet.Net
+import NovaNet.Peer
+import NovaNet.Peer.Handshake
+import NovaNet.Peer.Migration
+import NovaNet.Peer.Protocol
 import NovaNet.Reliability
 import NovaNet.Security
 import NovaNet.Stats

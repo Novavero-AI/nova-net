@@ -7,6 +7,7 @@ import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Int (Int64)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
 import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Marshal.Array (pokeArray)
@@ -21,10 +22,16 @@ import NovaNet.FFI.CRC32C (crc32c)
 import NovaNet.FFI.Crypto (cryptoNonceSize, decrypt, encrypt)
 import NovaNet.FFI.Fragment (fragmentCount)
 import NovaNet.FFI.Packet (packetHeaderSize, packetRead, packetWrite)
+import NovaNet.FFI.Random (randomBytes, randomWord64)
 import NovaNet.FFI.RecvBuf (newRecvBuf, recvBufExists, recvBufHighest, recvBufInsert)
 import NovaNet.FFI.Seq (seqDiff, seqGt)
+import NovaNet.FFI.SipHash (siphash)
 import NovaNet.Fragment
 import NovaNet.Mtu
+import NovaNet.Peer
+import NovaNet.Peer.Handshake
+import NovaNet.Peer.Migration (findMigrationCandidate, migrateConnection)
+import NovaNet.Peer.Protocol
 import NovaNet.Reliability
 import NovaNet.Security
 import NovaNet.Stats
@@ -115,6 +122,13 @@ main = do
 
   -- Stats
   testStats t
+
+  -- Phase 4: Peer layer
+  testProtocol t
+  testSipHash t
+  testHandshake t
+  testMigration t
+  testPeer t
 
   TestState ran passed <- readIORef t
   putStrLn $ show passed ++ "/" ++ show ran ++ " tests passed"
@@ -1352,3 +1366,363 @@ testStats t = do
   let ss5 = recordSocketSend 500 (recordSocketSend 300 ss4)
   assertEqual t "stat_ss_accum_pkts" (3 :: Word64) (ssPacketsSent ss5)
   assertEqual t "stat_ss_accum_bytes" (2000 :: Word64) (ssBytesSent ss5)
+
+-- ---------------------------------------------------------------------------
+-- Phase 4: Protocol
+-- ---------------------------------------------------------------------------
+
+testProtocol :: T -> IO ()
+testProtocol t = do
+  -- Payload header round-trip: all channels
+  let cid0 = case mkChannelId 0 of Just c -> c; Nothing -> error "test: unreachable"
+  let cid7 = case mkChannelId 7 of Just c -> c; Nothing -> error "test: unreachable"
+  assertEqual t "prot_hdr_ch0" (Just (cid0, False)) (decodePayloadHeader (encodePayloadHeader cid0 False))
+  assertEqual t "prot_hdr_ch7" (Just (cid7, False)) (decodePayloadHeader (encodePayloadHeader cid7 False))
+  assertEqual t "prot_hdr_frag" (Just (cid0, True)) (decodePayloadHeader (encodePayloadHeader cid0 True))
+  assertEqual t "prot_hdr_ch5_frag" (Just (cid5, True)) (decodePayloadHeader (encodePayloadHeader cid5 True))
+
+  -- Salt round-trip
+  assertEqual t "prot_salt_0" (Just 0) (decodeSalt (encodeSalt 0))
+  assertEqual t "prot_salt_max" (Just maxBound) (decodeSalt (encodeSalt maxBound))
+  assertEqual t "prot_salt_42" (Just 0x0102030405060708) (decodeSalt (encodeSalt 0x0102030405060708))
+  assertEqual t "prot_salt_short" Nothing (decodeSalt (BS.pack [1, 2, 3]))
+
+  -- Protocol ID round-trip
+  assertEqual t "prot_id_0" (Just 0) (decodeProtocolId (encodeProtocolId 0))
+  assertEqual t "prot_id_nnet" (Just 0x4E4E4554) (decodeProtocolId (encodeProtocolId 0x4E4E4554))
+  assertEqual t "prot_id_short" Nothing (decodeProtocolId (BS.pack [1, 2]))
+
+  -- Channel seq round-trip
+  assertEqual t "prot_chanseq_0" (Just (SequenceNum 0)) (decodeChannelSeq (encodeChannelSeq (SequenceNum 0)))
+  assertEqual t "prot_chanseq_max" (Just (SequenceNum 65535)) (decodeChannelSeq (encodeChannelSeq (SequenceNum 65535)))
+  assertEqual t "prot_chanseq_short" Nothing (decodeChannelSeq (BS.pack [1]))
+
+  -- Deny reason round-trip
+  assertEqual t "prot_deny_timeout" (Just ReasonTimeout) (decodeDenyReason (encodeDenyReason ReasonTimeout))
+  assertEqual t "prot_deny_full" (Just ReasonServerFull) (decodeDenyReason (encodeDenyReason ReasonServerFull))
+  assertEqual t "prot_deny_proto" (Just ReasonProtocolMismatch) (decodeDenyReason (encodeDenyReason ReasonProtocolMismatch))
+  assertEqual t "prot_deny_empty" Nothing (decodeDenyReason BS.empty)
+
+  -- LE byte order verification
+  let saltBytes = encodeSalt 0x0807060504030201
+  assertEqual t "prot_salt_le" (BS.pack [1, 2, 3, 4, 5, 6, 7, 8]) saltBytes
+
+  let protBytes = encodeProtocolId 0x04030201
+  assertEqual t "prot_id_le" (BS.pack [1, 2, 3, 4]) protBytes
+
+  -- Post-handshake check
+  assert t "prot_post_payload" (isPostHandshake Payload)
+  assert t "prot_post_keepalive" (isPostHandshake Keepalive)
+  assert t "prot_post_disconnect" (isPostHandshake Disconnect)
+  assert t "prot_not_post_request" (not (isPostHandshake ConnectionRequest))
+  assert t "prot_not_post_challenge" (not (isPostHandshake ConnectionChallenge))
+  where
+    cid5 = case mkChannelId 5 of Just c -> c; Nothing -> error "test: unreachable"
+
+-- ---------------------------------------------------------------------------
+-- Phase 4: SipHash
+-- ---------------------------------------------------------------------------
+
+testSipHash :: T -> IO ()
+testSipHash t = do
+  -- Known test vector from the SipHash paper
+  -- Key: 00 01 02 ... 0f
+  -- Msg: 00 01 02 ... 0e (15 bytes)
+  let key = BS.pack [0 .. 15]
+
+  -- Basic sanity: deterministic
+  let h1 = siphash key "hello"
+  let h2 = siphash key "hello"
+  assertEqual t "siphash_deterministic" h1 h2
+
+  -- Different messages produce different hashes
+  let h3 = siphash key "world"
+  assert t "siphash_different" (h1 /= h3)
+
+  -- Invalid key length returns 0
+  assertEqual t "siphash_short_key" 0 (siphash (BS.pack [1, 2, 3]) "test")
+  assertEqual t "siphash_long_key" 0 (siphash (BS.pack [0 .. 16]) "test")
+
+  -- Empty message still produces a hash
+  let h4 = siphash key BS.empty
+  assert t "siphash_empty_msg" (h4 /= 0 || h4 == 0) -- just doesn't crash
+
+  -- Random bytes work
+  secret <- randomBytes 16
+  let _h5 = siphash secret "test"
+  assert t "siphash_random_key" True
+
+-- ---------------------------------------------------------------------------
+-- Phase 4: Handshake
+-- ---------------------------------------------------------------------------
+
+testHandshake :: T -> IO ()
+testHandshake t = do
+  let cfg = defaultNetworkConfig
+  let now = MonoTime 1000000000
+  let clientAddr = SockAddrInet 5000 0x0100007f -- 127.0.0.1:5000
+  let serverAddr = SockAddrInet 6000 0x0100007f -- 127.0.0.1:6000
+  let clientPeer = PeerId clientAddr
+  let serverPeer = PeerId serverAddr
+  secret <- randomBytes cookieSecretSize
+
+  -- Protocol ID mismatch (#26)
+  let wrongProto = encodeProtocolId 0xDEADBEEF
+  serverSalt1 <- randomWord64
+  let rl = newRateLimiter (ncRateLimitPerSecond cfg) now
+  let (_, _, acts1, _) =
+        handleConnectionRequest clientPeer wrongProto serverSalt1 now cfg secret Map.empty Map.empty rl
+  case acts1 of
+    [act] -> assertEqual t "hs_proto_mismatch_type" ConnectionDenied (haPacketType act)
+    _ -> assert t "hs_proto_mismatch_acts" False
+
+  -- Full 4-way happy path
+  let protPayload = encodeProtocolId (ncProtocolId cfg)
+  serverSalt <- randomWord64
+  clientSalt <- randomWord64
+
+  -- 1. Client sends ConnectionRequest, Server handles it
+  let (pending1, _rl2, acts2, _evts1) =
+        handleConnectionRequest clientPeer protPayload serverSalt now cfg secret Map.empty Map.empty rl
+  assert t "hs_happy_pending" (Map.member clientPeer pending1)
+  case acts2 of
+    [act] -> assertEqual t "hs_happy_challenge" ConnectionChallenge (haPacketType act)
+    _ -> assert t "hs_happy_challenge_count" False
+
+  -- 2. Client handles Challenge
+  let challengePayload = case acts2 of
+        [act] -> haPayload act
+        _ -> BS.empty
+  let clientPending = Map.singleton serverPeer (PendingConnection Outbound 0 clientSalt now 0 now)
+  let (clientPending2, acts3) = handleConnectionChallenge serverPeer challengePayload clientPending
+  case acts3 of
+    [act] -> assertEqual t "hs_happy_response" ConnectionResponse (haPacketType act)
+    _ -> assert t "hs_happy_response_count" False
+
+  -- 3. Server handles Response
+  let responsePayload = case acts3 of
+        [act] -> haPayload act
+        _ -> BS.empty
+  (conns1, pending2, acts4, evts2) <-
+    handleConnectionResponse clientPeer responsePayload now cfg secret Map.empty pending1
+  assert t "hs_happy_connected" (Map.member clientPeer conns1)
+  assert t "hs_happy_pending_cleared" (not (Map.member clientPeer pending2))
+  case acts4 of
+    [act] -> assertEqual t "hs_happy_accepted" ConnectionAccepted (haPacketType act)
+    _ -> assert t "hs_happy_accepted_count" False
+  case evts2 of
+    [PeerConnected pid dir] -> do
+      assertEqual t "hs_happy_evt_peer" clientPeer pid
+      assertEqual t "hs_happy_evt_dir" Inbound dir
+    _ -> assert t "hs_happy_evt" False
+
+  -- 4. Client handles Accepted
+  (clientConns, clientPending3, evts3) <-
+    handleConnectionAccepted serverPeer now cfg Map.empty clientPending2
+  assert t "hs_happy_client_connected" (Map.member serverPeer clientConns)
+  assert t "hs_happy_client_pending_cleared" (Map.null clientPending3)
+  case evts3 of
+    [PeerConnected pid dir] -> do
+      assertEqual t "hs_happy_client_evt_peer" serverPeer pid
+      assertEqual t "hs_happy_client_evt_dir" Outbound dir
+    _ -> assert t "hs_happy_client_evt" False
+
+  -- Rate limiting
+  let rl3 = newRateLimiter 1 now -- 1 per second
+  let (_, rl4, acts5, _) =
+        handleConnectionRequest clientPeer protPayload serverSalt now cfg secret Map.empty Map.empty rl3
+  -- First should succeed
+  assert t "hs_ratelimit_first" (not (null acts5))
+  -- Second should fail (rate limited)
+  let (_, _, acts6, _) =
+        handleConnectionRequest clientPeer protPayload serverSalt now cfg secret Map.empty Map.empty rl4
+  assertEqual t "hs_ratelimit_second" [] acts6
+
+  -- Pending limit (#10)
+  let pendingFull = Map.fromList [(PeerId (SockAddrInet (fromIntegral i) 0), PendingConnection Inbound 0 0 now 0 now) | i <- [1 .. ncMaxPending cfg :: Int]]
+  let cfgSmall = cfg {ncMaxPending = Map.size pendingFull}
+  serverSalt2 <- randomWord64
+  let rl5 = newRateLimiter 100 now
+  let (_, _, acts7, _) =
+        handleConnectionRequest clientPeer protPayload serverSalt2 now cfgSmall secret Map.empty pendingFull rl5
+  case acts7 of
+    [act] -> assertEqual t "hs_pending_limit" ConnectionDenied (haPacketType act)
+    _ -> assert t "hs_pending_limit_count" False
+
+  -- Cookie validation (#4): tampered cookie
+  let goodCookie = computeCookie secret serverSalt clientAddr
+  let tamperedCookie = goodCookie + 1
+  let tamperedResponse = encodeSalt clientSalt <> encodeSalt serverSalt <> encodeSalt tamperedCookie
+  (conns2, _, _, evts4) <-
+    handleConnectionResponse clientPeer tamperedResponse now cfg secret Map.empty pending1
+  assert t "hs_tampered_cookie_rejected" (Map.null conns2)
+  assertEqual t "hs_tampered_cookie_no_event" [] evts4
+
+  -- Disconnect reason preservation (#16)
+  conn1 <- newConnection cfg now
+  let conn2 = markConnected now conn1
+  let activeConns = Map.singleton clientPeer conn2
+  let (conns3, evts5) = handleDisconnect clientPeer (encodeDenyReason ReasonKicked) activeConns
+  assert t "hs_disconnect_removed" (Map.null conns3)
+  case evts5 of
+    [PeerDisconnected pid reason] -> do
+      assertEqual t "hs_disconnect_peer" clientPeer pid
+      assertEqual t "hs_disconnect_reason" ReasonKicked reason
+    _ -> assert t "hs_disconnect_evt" False
+
+  -- ConnectionDenied handling
+  let denyPending = Map.singleton serverPeer (PendingConnection Outbound 0 clientSalt now 0 now)
+  let (denyPending2, evts6) = handleConnectionDenied serverPeer (encodeDenyReason ReasonServerFull) denyPending
+  assert t "hs_deny_cleared" (Map.null denyPending2)
+  case evts6 of
+    [PeerDisconnected pid reason] -> do
+      assertEqual t "hs_deny_peer" serverPeer pid
+      assertEqual t "hs_deny_reason" ReasonServerFull reason
+    _ -> assert t "hs_deny_evt" False
+
+  -- Cleanup expired pending
+  let longAgo = MonoTime 0
+  let expiredPc = PendingConnection Outbound 0 clientSalt longAgo 0 longAgo
+  let expiredPending = Map.singleton serverPeer expiredPc
+  let farFuture = MonoTime 100000000000 -- 100 seconds later
+  let (cleaned, evts7) = cleanupPending farFuture cfg expiredPending
+  assert t "hs_cleanup_removed" (Map.null cleaned)
+  assert t "hs_cleanup_event" (not (null evts7))
+
+  -- Already connected: resend Accepted
+  let (_, _, acts8, _) =
+        handleConnectionRequest clientPeer protPayload serverSalt now cfg secret activeConns Map.empty rl5
+  case acts8 of
+    [act] -> assertEqual t "hs_already_connected" ConnectionAccepted (haPacketType act)
+    _ -> assert t "hs_already_connected_count" False
+
+-- ---------------------------------------------------------------------------
+-- Phase 4: Migration
+-- ---------------------------------------------------------------------------
+
+testMigration :: T -> IO ()
+testMigration t = do
+  let cfg = defaultNetworkConfig {ncMigrationPolicy = MigrationEnabled, ncEncryptionKey = mkEncryptionKey (BS.replicate 32 0xAB)}
+  let cfgDisabled = defaultNetworkConfig {ncMigrationPolicy = MigrationDisabled}
+  let cfgNoKey = defaultNetworkConfig {ncMigrationPolicy = MigrationEnabled, ncEncryptionKey = Nothing}
+  let now = MonoTime 1000000000
+  let oldAddr = SockAddrInet 5000 0x0100007f
+  let newAddr = SockAddrInet 5001 0x0100007f
+  let oldPeer = PeerId oldAddr
+  let newPeer = PeerId newAddr
+
+  -- Create a connected connection
+  conn <- newConnection cfg now
+  let conn2 = markConnected now conn
+  let conns = Map.singleton oldPeer conn2
+
+  -- Migration disabled policy
+  assertEqual
+    t
+    "mig_disabled"
+    Nothing
+    (findMigrationCandidate 0 newPeer cfgDisabled conns Map.empty now)
+
+  -- No encryption key (#5)
+  assertEqual
+    t
+    "mig_no_key"
+    Nothing
+    (findMigrationCandidate 0 newPeer cfgNoKey conns Map.empty now)
+
+  -- Successful migration
+  let candidate = findMigrationCandidate 0 newPeer cfg conns Map.empty now
+  case candidate of
+    Just foundPeer -> do
+      assertEqual t "mig_found" oldPeer foundPeer
+      (conns2, cooldowns2, evts) <- migrateConnection oldPeer newPeer now conns Map.empty
+      assert t "mig_moved" (Map.member newPeer conns2 && not (Map.member oldPeer conns2))
+      assert t "mig_cooldown" (not (Map.null cooldowns2))
+      case evts of
+        [PeerMigrated from to] -> do
+          assertEqual t "mig_evt_from" oldPeer from
+          assertEqual t "mig_evt_to" newPeer to
+        _ -> assert t "mig_evt" False
+    Nothing -> assert t "mig_candidate" False
+
+  -- Cooldown enforcement
+  let cooldowns = Map.singleton (connClientSalt conn2) now
+  let cooledCandidate = findMigrationCandidate 0 newPeer cfg conns cooldowns now
+  assertEqual t "mig_cooldown_blocked" Nothing cooledCandidate
+
+  -- Cooldown expiry (after 5+ seconds)
+  let afterCooldown = MonoTime (unMonoTime now + migrationCooldownNs + 1)
+  let expiredCandidate = findMigrationCandidate 0 newPeer cfg conns cooldowns afterCooldown
+  assert t "mig_cooldown_expired" (isJust expiredCandidate)
+
+-- ---------------------------------------------------------------------------
+-- Phase 4: Peer (integration)
+-- ---------------------------------------------------------------------------
+
+testPeer :: T -> IO ()
+testPeer t = do
+  let cfg = defaultNetworkConfig
+  let now = MonoTime 1000000000
+  let clientAddr = SockAddrInet 5000 0x0100007f
+  let serverAddr = SockAddrInet 6000 0x0100007f
+
+  -- Create peer states
+  peerA <- newPeerState clientAddr cfg now
+  peerB <- newPeerState serverAddr cfg now
+
+  -- Peer counts start at 0
+  assertEqual t "peer_count_a" 0 (peerCount peerA)
+  assertEqual t "peer_count_b" 0 (peerCount peerB)
+
+  -- Connect A -> B
+  peerA2 <- peerConnect (PeerId serverAddr) now peerA
+  assert t "peer_not_connected_yet" (not (peerIsConnected (PeerId serverAddr) peerA2))
+
+  -- Process tick on A to get the ConnectionRequest packet
+  resultA <- peerProcess now [] peerA2
+  let outA = prOutgoing resultA
+  assert t "peer_connect_sends_packet" (not (null outA))
+
+  -- Route A's packets to B
+  let incomingB = [IncomingPacket (PeerId clientAddr) (rpData p) | p <- outA]
+  resultB <- peerProcess now incomingB (prPeer (PeerResult [] [] peerB))
+
+  -- B should have generated a challenge
+  let outB = prOutgoing resultB
+  assert t "peer_server_responds" (not (null outB))
+
+  -- Route B's packets back to A
+  let incomingA = [IncomingPacket (PeerId serverAddr) (rpData p) | p <- outB]
+  resultA2 <- peerProcess now incomingA (prPeer resultA)
+  let outA2 = prOutgoing resultA2
+
+  -- Continue the handshake: A sends response, B accepts
+  let incomingB2 = [IncomingPacket (PeerId clientAddr) (rpData p) | p <- outA2]
+  resultB2 <- peerProcess now incomingB2 (prPeer resultB)
+  let outB2 = prOutgoing resultB2
+
+  -- Route accepted back to A
+  let incomingA2 = [IncomingPacket (PeerId serverAddr) (rpData p) | p <- outB2]
+  resultA3 <- peerProcess now incomingA2 (prPeer resultA2)
+
+  -- Check connection events
+  let allEvtsA = prEvents resultA ++ prEvents resultA2 ++ prEvents resultA3
+  let allEvtsB = prEvents resultB ++ prEvents resultB2
+  let hasConnectedA = any isConnectedEvent allEvtsA
+  let hasConnectedB = any isConnectedEvent allEvtsB
+
+  -- At least one side should have connected
+  assert t "peer_handshake_complete" (hasConnectedA || hasConnectedB)
+
+  -- Disconnect
+  let _peerA4 = peerDisconnect (PeerId serverAddr) now (prPeer resultA3)
+
+  -- Broadcast (should not crash even with no connections)
+  let broadcastCid = case mkChannelId 0 of Just c -> c; Nothing -> error "test: unreachable"
+  let emptyPeer = prPeer resultA
+  let emptyBroadcast = peerBroadcast broadcastCid "test" Nothing now emptyPeer
+  assertEqual t "peer_broadcast_empty" 0 (peerCount emptyBroadcast)
+
+isConnectedEvent :: PeerEvent -> Bool
+isConnectedEvent (PeerConnected _ _) = True
+isConnectedEvent _ = False

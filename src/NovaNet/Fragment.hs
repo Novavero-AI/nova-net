@@ -302,15 +302,13 @@ encodeHeader msgId idx cnt =
 {-# INLINE encodeHeader #-}
 
 decodeHeader :: ByteString -> Maybe (Word32, Word8, Word8)
-decodeHeader bs
-  | BS.length bs < fragHeaderSize = Nothing
-  | otherwise =
-      let b0 = fromIntegral (BS.index bs 0) :: Word32
-          b1 = fromIntegral (BS.index bs 1) :: Word32
-          b2 = fromIntegral (BS.index bs 2) :: Word32
-          b3 = fromIntegral (BS.index bs 3) :: Word32
-          msgId = b0 .|. (b1 `shiftL` 8) .|. (b2 `shiftL` 16) .|. (b3 `shiftL` 24)
-          idx = BS.index bs 4
-          cnt = BS.index bs 5
-       in Just (msgId, idx, cnt)
+decodeHeader bs = case BS.unpack (BS.take fragHeaderSize bs) of
+  [b0, b1, b2, b3, idx, cnt] ->
+    let msgId =
+          fromIntegral b0
+            .|. (fromIntegral b1 `shiftL` 8)
+            .|. (fromIntegral b2 `shiftL` 16)
+            .|. (fromIntegral b3 `shiftL` 24)
+     in Just (msgId, idx, cnt)
+  _ -> Nothing
 {-# INLINE decodeHeader #-}

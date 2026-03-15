@@ -14,6 +14,8 @@
 #include "nn_rtt.h"
 #include "nn_ack_process.h"
 #include "nn_congestion.h"
+#include "nn_siphash.h"
+#include "nn_random.h"
 #include <string.h>
 
 /* ---------------------------------------------------------------------------
@@ -307,3 +309,17 @@ void nn_ffi_cong_cwnd_on_ack_seq(void *c, uint16_t acked_seq, int32_t acked_byte
 
 void nn_ffi_cong_cwnd_set_srtt(void *c, int64_t srtt_ns)
 { ((nn_cong_cwnd *)c)->srtt_ns = srtt_ns; }
+
+/* ---------------------------------------------------------------------------
+ * SipHash
+ * ------------------------------------------------------------------------- */
+
+uint64_t nn_ffi_siphash(const uint8_t *key, const uint8_t *msg, size_t msg_len)
+{ return nn_siphash_2_4(key, msg, msg_len); }
+
+/* ---------------------------------------------------------------------------
+ * CSPRNG
+ * ------------------------------------------------------------------------- */
+
+void nn_ffi_random_bytes(uint8_t *buf, size_t len)
+{ nn_random_bytes(buf, len); }
