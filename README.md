@@ -91,7 +91,7 @@ A general-purpose reliable UDP networking library. C99 handles the hot path (ser
 
 ## Status
 
-**v1.0 feature complete.** Builds clean with `-Werror` on Linux, macOS, and Windows.
+**Feature complete.** Builds clean with `-Werror` on Linux, macOS, and Windows.
 
 ---
 
