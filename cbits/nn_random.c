@@ -17,6 +17,7 @@
 #elif defined(__linux__)
   /* getentropy: up to NN_GETENTROPY_MAX bytes per call */
   #include <unistd.h>
+  #include <sys/random.h>
 
   #define NN_GETENTROPY_MAX 256
 

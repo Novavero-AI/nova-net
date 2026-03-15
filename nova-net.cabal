@@ -76,6 +76,9 @@ library
   include-dirs:     cbits
   cc-options:       -std=c99 -Wall -Wextra -Wpedantic -Werror
 
+  if os(windows)
+    extra-libraries:  bcrypt
+
   build-depends:
       base          >= 4.19 && < 5
     , bytestring    >= 0.11 && < 0.13
