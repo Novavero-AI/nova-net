@@ -31,21 +31,24 @@ A general-purpose reliable UDP networking library. C99 handles the hot path (ser
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│           User Application              │
-├─────────────────────────────────────────┤
-│  Haskell Protocol Brain                 │
-│  Connection, Peer, Handshake,           │
-│  Congestion, Channel, Replication       │
-├─────────────────────────────────────────┤
-│  FFI Boundary (unsafe ccall)            │
-│  NovaNet.FFI.{Packet,CRC32C,Seq,...}    │
-├─────────────────────────────────────────┤
-│  C99 Hot Path                           │
-│  nn_packet  nn_crc32c  nn_seq           │
-│  nn_fragment  nn_batch  nn_crypto       │
-│  nn_bandwidth  nn_wire                  │
-└─────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│           User Application                  │
+├─────────────────────────────────────────────┤
+│  Haskell Protocol Brain (38 modules)        │
+│  Peer, Connection, Channel, Reliability,    │
+│  Congestion, Handshake, Migration,          │
+│  Replication, TestNet, Simulator            │
+├─────────────────────────────────────────────┤
+│  FFI Boundary (unsafe ccall, flat args)     │
+│  NovaNet.FFI.{Packet,CRC32C,Seq,...}        │
+├─────────────────────────────────────────────┤
+│  C99 Hot Path (13 modules)                  │
+│  nn_packet  nn_crc32c  nn_seq  nn_rtt       │
+│  nn_fragment  nn_batch  nn_crypto           │
+│  nn_bandwidth  nn_congestion                │
+│  nn_ack_process  nn_siphash  nn_random      │
+│  nn_wire  nn_ffi                            │
+└─────────────────────────────────────────────┘
 ```
 
 ---
@@ -57,11 +60,16 @@ A general-purpose reliable UDP networking library. C99 handles the hot path (ser
 | `nn_wire.h` | Little-endian helpers, byte swap, buffer bounds (header-only) |
 | `nn_packet` | 9-byte packet header (68-bit wire format, 8 packet types) |
 | `nn_crc32c` | CRC32C integrity — SSE4.2, ARMv8 CRC hardware accel, software fallback |
-| `nn_seq` | Sequence numbers (wraparound-safe), 256-entry ring buffers, ACK bitfield, loss window, SplitMix RNG |
+| `nn_seq` | Sequence numbers (wraparound-safe), 256-entry ring buffers, ACK bitfield, loss window |
+| `nn_rtt` | Jacobson/Karels RTT estimation (RFC 6298) |
+| `nn_ack_process` | ACK bitfield processing against sent buffer and loss window |
+| `nn_congestion` | Dual-layer: AIMD bandwidth + CWND packet window |
 | `nn_fragment` | Fragment header (6 bytes LE), message splitting |
 | `nn_batch` | Message batching/unbatching (count + length-prefixed) |
 | `nn_crypto` | ChaCha20-Poly1305 AEAD (RFC 8439, from scratch, constant-time tag comparison) |
 | `nn_bandwidth` | Sliding window bandwidth tracker |
+| `nn_siphash` | SipHash-2-4 for HMAC cookies |
+| `nn_random` | OS CSPRNG (getentropy/arc4random_buf/BCryptGenRandom) |
 | `nn_ffi` | Flat-argument FFI entry points for Haskell |
 
 ---
@@ -83,11 +91,7 @@ A general-purpose reliable UDP networking library. C99 handles the hot path (ser
 
 ## Status
 
-**C99 hot path**: Complete (8 modules, 6 test suites passing).
-
-**Haskell FFI bindings**: Complete (9 modules, builds clean with `-Werror`).
-
-**Haskell protocol brain**: In progress (porting from gbnet-hs).
+**v1.0 feature complete.** Builds clean with `-Werror` on Linux, macOS, and Windows.
 
 ---
 

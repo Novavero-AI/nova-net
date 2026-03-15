@@ -1462,14 +1462,24 @@ testSipHash t = do
   assertEqual t "siphash_short_key" 0 (siphash (BS.pack [1, 2, 3]) "test")
   assertEqual t "siphash_long_key" 0 (siphash (BS.pack [0 .. 16]) "test")
 
-  -- Empty message still produces a hash
+  -- Empty message still produces a deterministic hash
   let h4 = siphash key BS.empty
-  assert t "siphash_empty_msg" (h4 /= 0 || h4 == 0) -- just doesn't crash
+  let h4b = siphash key BS.empty
+  assertEqual t "siphash_empty_msg" h4 h4b
 
   -- Random bytes work
   secret <- randomBytes 16
   let _h5 = siphash secret "test"
   assert t "siphash_random_key" True
+
+  -- Known-answer test vectors from the SipHash-2-4 reference paper
+  -- (Jean-Philippe Aumasson & Daniel J. Bernstein)
+  -- Key: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+  -- Messages of increasing length: 0, 1, 2, 3 bytes
+  assertEqual t "siphash_kat_0bytes" (0x726fdb47dd0e0e31 :: Word64) (siphash key BS.empty)
+  assertEqual t "siphash_kat_1byte" (0x74f839c593dc67fd :: Word64) (siphash key (BS.pack [0x00]))
+  assertEqual t "siphash_kat_2bytes" (0x0d6c8009d9a94f5a :: Word64) (siphash key (BS.pack [0x00, 0x01]))
+  assertEqual t "siphash_kat_3bytes" (0x85676696d7fb7e2d :: Word64) (siphash key (BS.pack [0x00, 0x01, 0x02]))
 
 -- ---------------------------------------------------------------------------
 -- Phase 4: Handshake
@@ -2098,4 +2108,4 @@ testSimulator t = do
   let (_, simBw2) = simulatorProcessSend "small" 12345 laterBw simBw
   -- With 100 bytes/sec budget and 1sec elapsed, we have ~100 tokens
   -- "small" is 5 bytes, so it should go through
-  assert t "sim_bw_allowed" (simulatorPendingCount simBw2 > 0 || True)
+  assert t "sim_bw_allowed" (simulatorPendingCount simBw2 > 0)

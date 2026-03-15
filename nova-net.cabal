@@ -16,12 +16,27 @@ maintainer:         devon.tomlin@novavero.ai
 homepage:           https://github.com/Novavero-AI/nova-net
 bug-reports:        https://github.com/Novavero-AI/nova-net/issues
 category:           Network, Game
-stability:          experimental
+stability:          stable
 build-type:         Simple
 tested-with:        GHC == 9.8.4
 extra-doc-files:
     README.md
     CHANGELOG.md
+extra-source-files:
+    cbits/nn_ack_process.h
+    cbits/nn_bandwidth.h
+    cbits/nn_batch.h
+    cbits/nn_congestion.h
+    cbits/nn_crc32c.h
+    cbits/nn_crypto.h
+    cbits/nn_ffi.h
+    cbits/nn_fragment.h
+    cbits/nn_packet.h
+    cbits/nn_random.h
+    cbits/nn_rtt.h
+    cbits/nn_seq.h
+    cbits/nn_siphash.h
+    cbits/nn_wire.h
 
 library
   exposed-modules:
@@ -102,6 +117,7 @@ library
     -Wcompat
     -Wincomplete-record-updates
     -Wincomplete-uni-patterns
+    -haddock
     -fspecialise-aggressively
     -fexpose-all-unfoldings
 

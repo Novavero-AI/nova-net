@@ -69,6 +69,7 @@ import Control.Monad (when)
 import Data.Bits (testBit)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Foldable (toList)
 import qualified Data.IntMap.Strict as IM
 import Data.List (sortBy)
 import qualified Data.Map.Strict as Map
@@ -95,6 +96,14 @@ bandwidthWindowMs = 1000.0
 -- | Number of bits in the wire ack bitfield.
 ackBitfieldBits :: Int
 ackBitfieldBits = 32
+
+-- | Maximum ack map size before pruning triggers.
+maxAckMapSize :: Int
+maxAckMapSize = 256
+
+-- | Prune entries this far behind the latest ack_seq (generous window).
+ackPruneWindow :: Word16
+ackPruneWindow = 128
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -130,7 +139,7 @@ data Connection = Connection
     -- Timing
     connLastSendTime :: !MonoTime,
     connLastRecvTime :: !MonoTime,
-    -- Subsystems
+    -- | Reliability tracking (sent buffer, loss window, ACK state).
     connReliability :: !ReliableEndpoint,
     connChannels :: !(IM.IntMap Channel),
     connChannelPriority :: ![Int],
@@ -143,7 +152,7 @@ data Connection = Connection
     connOutgoing :: !(IM.IntMap (Seq OutgoingMessage)),
     -- Send queue (ready to transmit)
     connSendQueue :: !(Seq OutgoingPacket),
-    -- Disconnect tracking
+    -- | Why this connection is disconnecting (if applicable).
     connDisconnectReason :: !(Maybe DisconnectReason),
     connDisconnectTime :: !(Maybe MonoTime),
     connDisconnectRetries :: !Int,
@@ -151,9 +160,11 @@ data Connection = Connection
     connFragmentAssembler :: !FragmentAssembler,
     -- Message ID for outgoing fragments
     connNextMessageId :: !MessageId,
-    -- Nonce / salt
+    -- | Outgoing nonce counter for anti-replay.
     connSendNonce :: !NonceCounter,
+    -- | Highest received nonce (sliding window anti-replay).
     connRecvNonceMax :: !(Maybe Word64),
+    -- | Client salt for connection identity (migration key).
     connClientSalt :: !Word64,
     -- Flags
     connPendingAck :: !Bool,
@@ -364,8 +375,9 @@ processIncomingHeader packetSeq ackSeq ackBitfield now conn = do
       -- 2. Process ACKs (C hot path)
       (outcome, rel2) <- processIncomingAck rel ackSeq ackBitfield now
 
-      -- 3. Resolve channel-level acks (pure)
-      let (ackedPairs, prunedMap) = resolveChannelAcks ackSeq ackBitfield (connAckMap conn)
+      -- 3. Resolve channel-level acks (pure) + prune unreachable entries
+      let (ackedPairs, resolvedMap) = resolveChannelAcks ackSeq ackBitfield (connAckMap conn)
+          prunedMap = pruneAckMap ackSeq resolvedMap
 
       -- 4. Acknowledge on channels (pure)
       let chans = foldl ackOnChannel (connChannels conn) ackedPairs
@@ -473,7 +485,7 @@ processRetransmissions now conn = do
 -- | Pop all queued packets for transmission.
 drainSendQueue :: Connection -> ([OutgoingPacket], Connection)
 drainSendQueue conn =
-  let pkts = foldr (:) [] (connSendQueue conn)
+  let pkts = toList (connSendQueue conn)
    in (pkts, conn {connSendQueue = Seq.empty})
 
 -- ---------------------------------------------------------------------------
@@ -606,6 +618,23 @@ enqueueDisconnect conn =
 encodeDisconnectReason :: Maybe DisconnectReason -> ByteString
 encodeDisconnectReason Nothing = BS.singleton 0
 encodeDisconnectReason (Just reason) = BS.singleton (disconnectReasonCode reason)
+
+-- | Prune ackMap entries unreachable by future acks.
+-- Entries more than ackPruneWindow behind the latest ack_seq will never
+-- appear in any future ack bitfield, so they are safely removable.
+pruneAckMap ::
+  Word16 ->
+  Map.Map Word16 (ChannelId, SequenceNum) ->
+  Map.Map Word16 (ChannelId, SequenceNum)
+pruneAckMap ackSeq m
+  | Map.size m <= maxAckMapSize = m
+  | otherwise =
+      Map.filterWithKey
+        (\k _ -> let d = ackSeq - k in d <= ackPruneWindow || d > seqHalf)
+        m
+  where
+    seqHalf :: Word16
+    seqHalf = 32768
 
 -- ---------------------------------------------------------------------------
 -- Time tracking

@@ -25,8 +25,8 @@ where
 
 import Control.Concurrent (ThreadId, forkIO, killThread)
 import Control.Concurrent.STM (TQueue, atomically, newTQueueIO, tryReadTQueue, writeTQueue)
-import Control.Exception (SomeException, catch)
-import Control.Monad (forever, void)
+import Control.Exception (IOException, catch)
+import Control.Monad (forever)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Trans.State.Strict (StateT (..), get)
 import Data.ByteString (ByteString)
@@ -71,11 +71,14 @@ openSocket host port = do
           { addrFlags = [AI_PASSIVE],
             addrSocketType = Datagram
           }
-  addr : _ <- getAddrInfo (Just hints) (Just host) (Just port)
-  sock <- socket (addrFamily addr) (addrSocketType addr) (addrProtocol addr)
-  setSocketOption sock ReuseAddr 1
-  bind sock (addrAddress addr)
-  pure UdpSocket {usSocket = sock, usLocalAddr = addrAddress addr}
+  addrs <- getAddrInfo (Just hints) (Just host) (Just port)
+  case addrs of
+    [] -> ioError (userError ("openSocket: no addresses for " ++ host ++ ":" ++ port))
+    (addr : _) -> do
+      sock <- socket (addrFamily addr) (addrSocketType addr) (addrProtocol addr)
+      setSocketOption sock ReuseAddr 1
+      bind sock (addrAddress addr)
+      pure UdpSocket {usSocket = sock, usLocalAddr = addrAddress addr}
 
 -- | Close the UDP socket.
 closeSocket :: UdpSocket -> IO ()
@@ -130,11 +133,13 @@ withNetT host port action = do
   pure result
 
 -- | Background receive loop.
+-- Only catches IOExceptions — async exceptions (e.g. ThreadKilled)
+-- propagate so that killThread can shut this loop down cleanly.
 recvLoop :: UdpSocket -> TQueue (ByteString, SockAddr) -> IO ()
 recvLoop sock q = forever $ do
   result <-
     (Just <$> recvFrom (usSocket sock) maxUdpPacketSize)
-      `catch` (\(_ :: SomeException) -> pure Nothing)
+      `catch` (\(_ :: IOException) -> pure Nothing)
   case result of
     Nothing -> pure ()
     Just (bs, addr)
@@ -157,10 +162,9 @@ instance (MonadIO m) => MonadTime (NetT m) where
 instance (MonadIO m) => MonadNetwork (NetT m) where
   netSend addr bs = NetT $ do
     ns <- get
-    liftIO $ do
-      void (sendTo (usSocket (nsSocket ns)) bs addr)
-        `catch` (\(_ :: SomeException) -> pure ())
-    pure (Right ())
+    liftIO $
+      (Right () <$ sendTo (usSocket (nsSocket ns)) bs addr)
+        `catch` (\(_ :: IOException) -> pure (Left (NetSendFailed (SendErrno 0))))
 
   netRecv = NetT $ do
     ns <- get

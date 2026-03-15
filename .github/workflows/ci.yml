@@ -97,3 +97,13 @@ jobs:
 
       - name: Test
         run: cabal test --enable-tests --ghc-options="-Werror" --test-show-details=streaming
+
+      - name: Haddock
+        if: matrix.name == 'Linux'
+        run: cabal haddock --enable-tests
+
+      - name: sdist roundtrip
+        if: matrix.name == 'Linux'
+        run: |
+          cabal sdist -o /tmp/sdist
+          cd /tmp && tar xzf sdist/nova-net-*.tar.gz && cd nova-net-* && cabal build

@@ -42,6 +42,7 @@ where
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Data.Foldable (toList)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.IntSet as IS
 import Data.Sequence (Seq, (|>))
@@ -106,9 +107,13 @@ data Channel = Channel
     chReceiveQueue :: !(Seq ByteString),
     chOrderedBuffer :: !(IM.IntMap OooEntry),
     chRecvSeen :: !IS.IntSet,
+    -- | Total messages enqueued for sending.
     chStatsSent :: !Word64,
+    -- | Total messages delivered to the receive queue.
     chStatsReceived :: !Word64,
+    -- | Total messages dropped (duplicates, stale, or exceeded retries).
     chStatsDropped :: !Word64,
+    -- | Total messages retransmitted.
     chStatsRetransmits :: !Word64
   }
 
@@ -217,7 +222,7 @@ onMessageReceived seq_ payload now ch =
 -- | Drain all delivered messages.
 channelReceive :: Channel -> ([ByteString], Channel)
 channelReceive ch =
-  let msgs = foldr (:) [] (chReceiveQueue ch)
+  let msgs = toList (chReceiveQueue ch)
    in (msgs, ch {chReceiveQueue = Seq.empty})
 
 -- ---------------------------------------------------------------------------
@@ -373,45 +378,49 @@ flushTimedOutOrdered now ch
           timedOut = IM.filter isTimedOut (chOrderedBuffer ch)
        in if IM.null timedOut
             then ch
-            else
-              -- Deliver timed-out messages in key order, advance expected seq
-              let delivered =
-                    IM.foldlWithKey'
-                      (\q _ ooe -> q |> ooePayload ooe)
-                      (chReceiveQueue ch)
-                      timedOut
-                  remaining = IM.difference (chOrderedBuffer ch) timedOut
-                  -- Find highest key and advance expected past it
-                  highestKey = fst (IM.findMax timedOut)
-                  newExpected = nextSeq (SequenceNum (fromIntegral highestKey))
-                  -- Only advance if it's actually ahead
-                  finalExpected
-                    | seqGt (unSequenceNum newExpected) (unSequenceNum (chExpectedSeq ch)) =
-                        newExpected
-                    | otherwise = chExpectedSeq ch
-               in flushConsecutive
-                    ch
-                      { chReceiveQueue = delivered,
-                        chOrderedBuffer = remaining,
-                        chExpectedSeq = finalExpected,
-                        chStatsReceived = chStatsReceived ch + fromIntegral (IM.size timedOut)
-                      }
+            else case IM.lookupMax timedOut of
+              Nothing -> ch -- unreachable: guarded by IM.null check above
+              Just (highestKey, _) ->
+                -- Deliver timed-out messages in key order, advance expected seq
+                let delivered =
+                      IM.foldlWithKey'
+                        (\q _ ooe -> q |> ooePayload ooe)
+                        (chReceiveQueue ch)
+                        timedOut
+                    remaining = IM.difference (chOrderedBuffer ch) timedOut
+                    newExpected = nextSeq (SequenceNum (fromIntegral highestKey))
+                    -- Only advance if it's actually ahead
+                    finalExpected
+                      | seqGt (unSequenceNum newExpected) (unSequenceNum (chExpectedSeq ch)) =
+                          newExpected
+                      | otherwise = chExpectedSeq ch
+                 in flushConsecutive
+                      ch
+                        { chReceiveQueue = delivered,
+                          chOrderedBuffer = remaining,
+                          chExpectedSeq = finalExpected,
+                          chStatsReceived = chStatsReceived ch + fromIntegral (IM.size timedOut)
+                        }
 
 -- | Remove stale entries from the dedup set (ReliableUnordered).
+-- Uses circular distance to correctly handle sequence wraparound.
 cleanupDedupSet :: Channel -> Channel
 cleanupDedupSet ch
   | ccDeliveryMode (chConfig ch) /= ReliableUnordered = ch
   | IS.size (chRecvSeen ch) <= maxDedupSetSize = ch
   | otherwise =
-      -- Keep only the most recent entries (within half the sequence space)
+      -- Keep only entries within half the sequence space (circular distance)
       let recvRaw = fromIntegral (unSequenceNum (chRecvSeq ch)) :: Int
           keepPred key =
-            let dist = abs (recvRaw - key)
-             in dist < fromIntegral (seqHalfRange :: Word16)
+            let linearDist = abs (recvRaw - key)
+                circularDist = min linearDist (seqSpaceSize - linearDist)
+             in circularDist < fromIntegral (seqHalfRange :: Word16)
        in ch {chRecvSeen = IS.filter keepPred (chRecvSeen ch)}
   where
     seqHalfRange :: Word16
     seqHalfRange = 32768
+    seqSpaceSize :: Int
+    seqSpaceSize = 65536
 
 -- ---------------------------------------------------------------------------
 -- Helpers

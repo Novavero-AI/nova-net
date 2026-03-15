@@ -9,7 +9,6 @@ where
 
 import Data.Int (Int32, Int64)
 import Data.Word (Word16, Word32, Word64)
-import Foreign.C.Types (CInt (..))
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (peek)
@@ -36,7 +35,7 @@ foreign import ccall unsafe "nn_ffi_ack_process"
     Ptr Int32 ->
     Ptr Int64 ->
     Ptr Int32 ->
-    Ptr CInt ->
+    Ptr Int32 ->
     Ptr Word16 ->
     IO ()
 

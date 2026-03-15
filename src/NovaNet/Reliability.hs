@@ -88,13 +88,20 @@ data ReliableEndpoint = ReliableEndpoint
     reRecvBuf :: !RecvBuf,
     reLossWindow :: !LossWindow,
     reRttEstimator :: !RttEstimator,
+    -- | Next local sequence number to allocate.
     reLocalSeq :: !SequenceNum,
+    -- | Highest remote sequence number seen.
     reRemoteSeq :: !Word16,
     reAckBits :: !Word64,
+    -- | Total packets sent.
     reTotalSent :: !Word64,
+    -- | Total packets acknowledged by the remote.
     reTotalAcked :: !Word64,
+    -- | Total packets declared lost.
     reTotalLost :: !Word64,
+    -- | Total payload bytes sent.
     reBytesSent :: !Word64,
+    -- | Total payload bytes acknowledged.
     reBytesAcked :: !Word64,
     reMaxSeqDist :: !Word16
   }

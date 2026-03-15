@@ -76,7 +76,10 @@ import Network.Socket (SockAddr)
 
 -- | Channel identifier (0-7, 3 bits on wire).
 -- Use 'mkChannelId' to construct; values outside 0-7 are rejected.
-newtype ChannelId = ChannelId {unChannelId :: Word8}
+newtype ChannelId = ChannelId
+  { -- | Unwrap the raw channel byte.
+    unChannelId :: Word8
+  }
   deriving (Eq, Ord, Show)
 
 -- | Construct a 'ChannelId'. Returns 'Nothing' if the value exceeds 7.
@@ -340,7 +343,10 @@ data MigrationPolicy
 
 -- | 256-bit encryption key for ChaCha20-Poly1305.
 -- Use 'mkEncryptionKey' to construct; only accepts exactly 32 bytes.
-newtype EncryptionKey = EncryptionKey {unEncryptionKey :: ByteString}
+newtype EncryptionKey = EncryptionKey
+  { -- | Unwrap the raw 32-byte key.
+    unEncryptionKey :: ByteString
+  }
   deriving (Eq)
 
 -- | Construct an 'EncryptionKey'. Returns 'Nothing' if the ByteString

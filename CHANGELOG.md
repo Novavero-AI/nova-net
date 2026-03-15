@@ -1,34 +1,49 @@
 # Changelog
 
+## 1.0.0.0
+
+First stable release.
+
+### Protocol Core
+
+- Jacobson/Karels RTT estimation (RFC 6298) in C
+- ACK bitfield processing with 256-entry ring buffers and 256-bit loss window in C
+- Dual-layer congestion control: AIMD bandwidth + CWND packet window with slow start, congestion avoidance, and fast recovery in C
+- Reliable endpoint with send/receive tracking and ACK generation
+- Five delivery modes: unreliable, unreliable sequenced, reliable unordered, reliable ordered, reliable sequenced
+- Connection four-state FSM with timeout, keepalive, and graceful disconnect
+
+### Subsystems
+
+- Fragment split/reassemble with LRU eviction and timeout cleanup
+- Binary search path MTU discovery
+- Per-source rate limiting, connect tokens with replay detection, FNV-1a address hashing
+- Quality/congestion/traffic counters
+
+### Peer Layer
+
+- SipHash-2-4 in C, OS CSPRNG via getentropy/BCryptGenRandom in C
+- Four-way HMAC-cookie handshake with challenge-response
+- Address migration with cooldown and encryption gate
+- Wire protocol with little-endian encoding, CRC32C integrity, ChaCha20-Poly1305 AEAD
+- Real UDP socket backend via MonadNetwork
+
+### Replication
+
+- NetworkDelta typeclass (diff/apply) with sender-side DeltaTracker and receiver-side BaselineManager
+- Interest management: radius (squared distance) and grid (cell-based with distance weighting)
+- Priority accumulator with budget-constrained drain
+- Snapshot interpolation with playback delay and clamped lerp
+
+### Testing Infrastructure
+
+- Pure deterministic TestNet (State monad, xorshift64 RNG, MonadTime/MonadNetwork instances)
+- Network simulator with token bucket bandwidth, configurable loss/latency/jitter/duplicates/reordering
+
+### Port Fixes
+
+Fourteen fixes carried over from the gbnet-hs audit: loss window feedback, CWND recovery exit, ring buffers (wraparound fix), single RTT sample per ACK, double precision, HMAC-bound cookies, migration encryption gate, max pending limit, simultaneous connect, disconnect reason codes, protocol ID validation, squared distance interest, grid weighting, double precision priority.
+
 ## 0.1.0.0
 
-### Initial Release
-
-- Project scaffold: Cabal package, CI/CD (HLint, Ormolu, 3-platform matrix build, Hackage publish), BSD-3-Clause license.
-
-### C99 Hot Path
-
-- `nn_wire`: Little-endian read/write helpers, byte swap, buffer bounds checking (header-only).
-- `nn_packet`: 9-byte packet header serialization (68-bit wire format, 8 packet types).
-- `nn_crc32c`: CRC32C with SSE4.2 (x86_64), ARMv8 CRC (aarch64) hardware acceleration, software fallback.
-- `nn_seq`: Wraparound-safe sequence numbers, 256-entry ring buffers, ACK bitfield processing, 256-bit loss window, SplitMix RNG.
-- `nn_fragment`: Fragment header (6 bytes LE), message splitting.
-- `nn_batch`: Message batching and unbatching (count + length-prefixed, LE).
-- `nn_crypto`: ChaCha20-Poly1305 AEAD encryption (RFC 8439, from scratch, zero deps, constant-time tag comparison).
-- `nn_bandwidth`: Sliding window bandwidth tracker.
-- `nn_ffi`: Flat-argument FFI entry points for Haskell (no struct marshalling).
-
-### Haskell FFI Bindings
-
-- `NovaNet.Types`: Domain newtypes (ChannelId, SequenceNum, MessageId, MonoTime, NonceCounter).
-- `NovaNet.FFI.Packet`: Packet header write/read via unsafe FFI.
-- `NovaNet.FFI.CRC32C`: Hardware-accelerated CRC32C compute/append/validate.
-- `NovaNet.FFI.Seq`: Sequence number comparison and difference.
-- `NovaNet.FFI.Fragment`: Fragment header, count, and build.
-- `NovaNet.FFI.Batch`: Batch format constants.
-- `NovaNet.FFI.Crypto`: ChaCha20-Poly1305 encrypt/decrypt with error ADT.
-- `NovaNet.FFI.Bandwidth`: Opaque ForeignPtr bandwidth tracker.
-
-### Wire Format
-
-- All multi-byte wire fields standardised to little-endian (fixes mixed endianness from gbnet-hs heritage).
+Initial release. Project scaffold, C99 hot path (8 modules), Haskell FFI bindings (9 modules), three-platform CI, Hackage name secured.

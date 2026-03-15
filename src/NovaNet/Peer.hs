@@ -43,6 +43,7 @@ where
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
+import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Sequence (Seq, (|>))
@@ -262,11 +263,16 @@ peerProcess now incoming peer = do
   -- 6. Drain send queue
   let (outgoing, peer6) = drainPeerSendQueue peer5
 
+  -- 7. Evict expired migration cooldowns
+  let cleanedCooldowns =
+        Map.filter (\t -> diffNs t now < migrationCooldownNs) (npMigrationCooldowns peer6)
+      peer7 = peer6 {npMigrationCooldowns = cleanedCooldowns}
+
   pure
     PeerResult
       { prEvents = events1 ++ events2 ++ events3,
         prOutgoing = outgoing,
-        prPeer = peer6
+        prPeer = peer7
       }
 
 -- ---------------------------------------------------------------------------
@@ -553,7 +559,7 @@ serializeOutgoing pid pkt = do
 -- | Drain the peer-level send queue.
 drainPeerSendQueue :: NetPeer -> ([RawPacket], NetPeer)
 drainPeerSendQueue peer =
-  let pkts = foldr (:) [] (npSendQueue peer)
+  let pkts = toList (npSendQueue peer)
    in (pkts, peer {npSendQueue = Seq.empty})
 
 -- ---------------------------------------------------------------------------
